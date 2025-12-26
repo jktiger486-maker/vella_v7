@@ -1,0 +1,147 @@
+## CODEGEN_20_RUNNER / LOOP DRIVER v1 (TIME & LIFECYCLE ONLY)
+
+## 목적
+이 문서는 VELLA_V7의 **Runner(Loop Driver)** 를 정의한다.
+
+원칙:
+- 판단 ❌
+- 계산 ❌
+- 전략 ❌
+- 상태 변경 ❌
+- 오직 **주기·생명주기·종료 제어**만 담당
+
+👉 Runner는 엔진을 “돌리는 손”이지, 두뇌가 아니다.
+
+
+============================================================
+## 0. 변경 대상
+============================================================
+
+
+vella_v7/runner/runner.py
+
+
+
+- CODEGEN-19 (Orchestrator) 위에서만 동작
+- Orchestrator 내부 로직 침범 ❌
+- 모듈 직접 호출 ❌
+
+
+============================================================
+## 1. 설계 핵심 (주인님 확인용)
+============================================================
+
+- Runner는 Orchestrator.step()만 호출
+- sleep / tick / 종료 조건은 Runner 책임
+- 장애/중단/신호 처리는 Runner에서만 관리
+- 엔진은 “순수 함수적 파이프라인” 유지
+
+
+============================================================
+## 2. runner.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-3, CODEGEN-20
+# ============================================================
+
+import time
+from typing import Optional
+
+from vella_v7.orchestrator.orchestrator import Orchestrator
+
+
+class Runner:
+    """
+    Runner / Loop Driver v1
+
+    Responsibilities:
+    - timing
+    - lifecycle
+    - graceful shutdown
+    """
+
+    def __init__(
+        self,
+        orchestrator: Orchestrator,
+        tick_seconds: float = 1.0,
+    ):
+        self.orchestrator = orchestrator
+        self.tick_seconds = tick_seconds
+        self._running = False
+
+    def start(self) -> None:
+        """
+        Start infinite loop.
+        """
+        self._running = True
+        while self._running:
+            self.step()
+            time.sleep(self.tick_seconds)
+
+    def stop(self) -> None:
+        """
+        Stop loop gracefully.
+        """
+        self._running = False
+
+    def step(self) -> None:
+        """
+        Execute exactly one orchestrator cycle.
+        """
+        self.orchestrator.step()
+
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+주문 판단 ❌
+
+상태 변경 ❌
+
+signal 검사 ❌
+
+예외 처리 로직 ❌
+
+재시도 ❌
+
+Runner는 시간 관리자다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+if entry_signal:
+
+if self.state:
+
+exchange 호출
+
+logging 판단
+
+try/except 전략 처리
+
+👉 전부 구조 붕괴
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+엔진과 실행 제어가 완전히 분리되었다
+
+테스트/라이브/백테스트 Runner 교체 가능
+
+VELLA_V7은 “엔진 불변 + 드라이버 교체” 구조다
+
+🎯 VELLA_V7 실행 구조 완성
