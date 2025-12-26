@@ -1,0 +1,84 @@
+CODEGEN-0 : VELLA_V7 PROJECT SKELETON
+
+
+vella_v7/
+│
+├── README.md
+│
+├── app/
+│   ├── __init__.py
+│   └── orchestrator.py          # PIT-4 기준, 조립만 담당
+│
+├── contracts/
+│   ├── __init__.py
+│   └── contracts.py             # PIT-2 자동생성 대상
+│
+├── modules/
+│   ├── context/
+│   │   ├── __init__.py
+│   │   └── context.py            # 시장 상태 생성만
+│   │
+│   ├── entry/
+│   │   ├── __init__.py
+│   │   └── entry.py              # 진입 판단만
+│   │
+│   ├── exit/
+│   │   ├── __init__.py
+│   │   └── exit.py               # 청산 판단만
+│   │
+│   ├── risk/
+│   │   ├── __init__.py
+│   │   └── risk.py               # 리스크 계산만
+│   │
+│   ├── execution/
+│   │   ├── __init__.py
+│   │   └── execution.py          # 주문 실행만
+│   │
+│   └── state/
+│       ├── __init__.py
+│       └── state.py               # 사실 기록만
+│
+├── config/
+│   ├── __init__.py
+│   └── cfg_schema.py              # 구조만 정의 (로직 ❌)
+│
+└── pit/
+    ├── PIT_0_CONSTITUTION.md
+    ├── PIT_1_ARCHITECTURE.md
+    ├── PIT_2_CONTRACTS.md
+    ├── PIT_3_STATE_EVENT_FLOW.md
+    ├── PIT_4_APP_ORCHESTRATOR.md
+    ├── PIT_5_MODULE_CONTRACTS.md
+    └── PIT_6_CODE_GENERATION_RULES.md
+
+🧠 주인님 이해용 핵심 설명 (중요)
+
+1️⃣   왜 이 구조가 “다시는 엮이지 않는가”
+
+modules/
+→ 서로 import 안 함
+→ contracts만 본다
+
+app/orchestrator.py
+→ if 판단 없음
+→ 계산 없음
+→ 순서만 있음
+
+contracts/
+→ 모든 모듈의 유일한 언어
+→ 여기 안 쓰인 정보 = 존재하지 않는 정보
+
+state/
+→ 기록만
+→ 과거를 근거로 판단 불가
+
+
+3️⃣    지금 단계에서 절대 하지 말 것
+
+❌ 전략 구현
+❌ EMA / 레짐 / TP / SL
+❌ 바이낸스 연결
+❌ 실험 코드
+
+지금은 뼈대 확정 단계다.
+여기서 흔들리면 또 4일 날린다.
