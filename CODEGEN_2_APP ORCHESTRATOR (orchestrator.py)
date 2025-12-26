@@ -1,0 +1,199 @@
+# CODEGEN-2 : APP ORCHESTRATOR (orchestrator.py)
+
+## 목적
+이 문서는 **VELLA_V7의 app/orchestrator.py를 PIT-4 기준으로
+자동 생성하는 규칙과 결과물**을 고정한다.
+
+- 이 파일은 판단을 하지 않는다
+- 이 파일은 계산을 하지 않는다
+- 이 파일은 오직 **순서와 전달만 담당**한다
+
+
+============================================================
+## 0. 생성 대상 파일
+============================================================
+
+vella_v7/app/orchestrator.py
+
+
+
+- 수동 수정 ❌
+- 모든 변경은 PIT → 재생성
+
+
+============================================================
+## 1. 설계 핵심 요약 (주인님 확인용)
+============================================================
+
+- if 조건은 **존재 여부 확인만 허용**
+- 수치 비교 ❌
+- 전략 분기 ❌
+- 의미 해석 ❌
+
+👉 “있으면 호출, 없으면 종료”가 전부
+
+
+============================================================
+## 2. orchestrator.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-4 (APP ORCHESTRATOR RULES)
+# ============================================================
+
+from typing import Optional
+
+from vella_v7.contracts.contracts import (
+    ContextSnapshot,
+    EntrySignal,
+    ExitSignal,
+    RiskProfile,
+    ExecutionOrder,
+    ExecutionResult,
+    EngineState,
+)
+
+from vella_v7.modules.context.context import build_context_snapshot
+from vella_v7.modules.entry.entry import generate_entry_signal
+from vella_v7.modules.exit.exit import generate_exit_signal
+from vella_v7.modules.risk.risk import generate_risk_profile
+from vella_v7.modules.execution.execution import execute_order
+from vella_v7.modules.state.state import update_state
+
+
+class Orchestrator:
+    """
+    VELLA_V7 Orchestrator
+
+    - 전략 판단 ❌
+    - 계산 ❌
+    - 해석 ❌
+
+    역할:
+    - Event 전달
+    - 호출 순서 보장
+    """
+
+    def run_cycle(self, market_data, state: EngineState) -> EngineState:
+        # ----------------------------------------------------
+        # 1. Context
+        # ----------------------------------------------------
+        context: ContextSnapshot = build_context_snapshot(market_data)
+
+        # ----------------------------------------------------
+        # 2. Exit (if position exists)
+        # ----------------------------------------------------
+        if state.has_position:
+            exit_signal: Optional[ExitSignal] = generate_exit_signal(
+                context=context,
+                state=state,
+            )
+
+            if exit_signal is not None:
+                result: ExecutionResult = execute_order(
+                    ExecutionOrder(
+                        action="CLOSE",
+                        side=state.position_side,
+                        size=state.position_size,
+                        price=None,
+                    )
+                )
+                return update_state(
+                    prev_state=state,
+                    execution_result=result,
+                    event_type="EXIT",
+                )
+
+        # ----------------------------------------------------
+        # 3. Entry
+        # ----------------------------------------------------
+        entry_signal: Optional[EntrySignal] = generate_entry_signal(
+            context=context,
+            state=state,
+        )
+
+        if entry_signal is None:
+            return state
+
+        # ----------------------------------------------------
+        # 4. Risk
+        # ----------------------------------------------------
+        risk: RiskProfile = generate_risk_profile(
+            entry_signal=entry_signal,
+            context=context,
+        )
+
+        # ----------------------------------------------------
+        # 5. Execution
+        # ----------------------------------------------------
+        result: ExecutionResult = execute_order(
+            ExecutionOrder(
+                action="OPEN",
+                side=entry_signal.side,
+                size=risk.position_size,
+                price=None,
+            )
+        )
+
+        # ----------------------------------------------------
+        # 6. State Update
+        # ----------------------------------------------------
+        return update_state(
+            prev_state=state,
+            execution_result=result,
+            event_type="ENTRY",
+        )
+
+
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+Orchestrator 내부에는:
+
+price 비교 ❌
+
+confidence 해석 ❌
+
+stop_loss / take_profit 사용 ❌
+
+이 모든 것은 각 모듈의 책임이다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래 중 하나라도 보이면 즉시 삭제 대상이다.
+
+if confidence >
+
+if risk.
+
+adjust
+
+optimize
+
+score
+
+V7의 app은 무지할수록 강하다.
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+app은 뇌가 아니다
+
+app은 손이다
+
+app은 엮이지 않는다
+
+이 파일은 V7의 중앙 통제점이 아니라 단순 허브다.
