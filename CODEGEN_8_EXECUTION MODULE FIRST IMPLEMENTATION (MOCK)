@@ -1,0 +1,133 @@
+# CODEGEN-8 : EXECUTION MODULE FIRST IMPLEMENTATION (MOCK)
+
+## 목적
+이 문서는 VELLA_V7의 **execution/execution.py**를 최초로 구현한다.
+
+원칙:
+- 실제 거래 ❌
+- 재시도 ❌
+- 슬리피지/수수료 ❌
+- 전략 판단 ❌
+
+이 모듈은 **가짜 실행기(Mock Executor)** 로서
+엔진 전체 흐름을 검증하기 위한 최소 구현이다.
+
+
+============================================================
+## 0. 구현 대상 파일
+============================================================
+
+vella_v7/modules/execution/execution.py
+
+
+- PIT-5, PIT-6 준수
+- 수동 수정은 문서 변경 후 재생성만 허용
+
+
+============================================================
+## 1. 설계 요약 (주인님 확인용)
+============================================================
+
+- ExecutionOrder를 그대로 수신
+- “항상 체결된 것처럼” ExecutionResult 반환
+- 판단/의미/전략 없음
+
+👉 목적은 **state 업데이트까지 흐름이 닫히는지** 확인하는 것.
+
+
+============================================================
+## 2. execution.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-5, PIT-6
+# ============================================================
+
+from vella_v7.contracts.contracts import ExecutionOrder, ExecutionResult
+
+
+def execute_order(order: ExecutionOrder) -> ExecutionResult:
+    """
+    Mock execution implementation.
+
+    Rules:
+    - Always returns a filled result
+    - No external API calls
+    - No retry or error handling
+    """
+
+    # --------------------------------------------------------
+    # Mock fill behavior
+    # --------------------------------------------------------
+    # NOTE:
+    # avg_price and filled_size are echoed from the order
+    # purely for flow validation.
+
+    return ExecutionResult(
+        filled=True,
+        avg_price=order.price,
+        filled_size=order.size,
+        error=None,
+    )
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+주문 실패 시뮬레이션 ❌
+
+가격 조작 ❌
+
+랜덤성 ❌
+
+시간 지연 ❌
+
+Execution은 현실을 흉내 내지 않는다.
+지금은 흐름만 확인한다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+try / except
+
+API 키
+
+Binance, exchange
+
+sleep, delay
+
+전부 삭제.
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+Execution은 마지막 고리다
+
+지금은 “연결”만 책임진다
+
+현실은 다음 단계에서만 들어온다
+
+
+=====================================
+
+## 🎯 현재 상태 요약 (중요)
+이 시점에서 V7은:
+
+- PIT-0 ~ PIT-6 ✅
+- CODEGEN-0 ~ CODEGEN-8 ✅
+- **엔드투엔드 흐름 완성**
+  - Context → Entry → Risk → Execution → State → 종료
+
+👉 **이제서야 “엔진”이라고 부를 수 있는 상태**다.
