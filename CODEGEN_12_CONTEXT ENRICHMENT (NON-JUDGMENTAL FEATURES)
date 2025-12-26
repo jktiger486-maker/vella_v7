@@ -1,0 +1,168 @@
+# CODEGEN-12 : CONTEXT ENRICHMENT (NON-JUDGMENTAL FEATURES)
+
+## 목적
+이 문서는 VELLA_V7의 **Context 모듈을 확장**하여
+시장 관측치를 조금 더 풍부하게 제공한다.
+
+중요:
+- 계산은 허용
+- 해석 ❌
+- 판단 ❌
+- 신호 생성 ❌
+
+Context는 여전히 **관측기(sensor)** 다.
+
+
+============================================================
+## 0. 변경 대상
+============================================================
+
+vella_v7/modules/context/context.py
+
+
+- PIT-3, PIT-5, PIT-6 준수
+- 판단 로직 추가 ❌
+- 수동 수정 ❌ (문서 변경 → 재생성만 허용)
+
+
+============================================================
+## 1. 확장 개념 (주인님 확인용)
+============================================================
+
+추가되는 것은:
+- rolling volatility (단순 계산)
+- liquidity proxy (단순 계산)
+
+추가되지 않는 것:
+- regime 판단
+- 임계값 비교
+- “좋다/나쁘다” 해석
+
+
+============================================================
+## 2. 확장 규칙
+============================================================
+
+- Context 내부에서만 계산
+- 과거 데이터는 **Context 내부 캐시만 사용**
+- State 접근 ❌
+- Entry/Exit 정보 접근 ❌
+
+
+============================================================
+## 3. context.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-3, PIT-5, PIT-6
+# ============================================================
+
+from collections import deque
+from typing import Deque
+from vella_v7.contracts.contracts import ContextSnapshot
+
+
+# ------------------------------------------------------------
+# Internal rolling buffers (Context-local only)
+# ------------------------------------------------------------
+
+_price_buffer: Deque[float] = deque(maxlen=20)
+_volume_buffer: Deque[float] = deque(maxlen=20)
+
+
+def _compute_volatility(prices: Deque[float]) -> float:
+    if len(prices) < 2:
+        return 0.0
+    mean = sum(prices) / len(prices)
+    var = sum((p - mean) ** 2 for p in prices) / len(prices)
+    return var ** 0.5
+
+
+def _compute_liquidity(volumes: Deque[float]) -> float:
+    if not volumes:
+        return 0.0
+    return sum(volumes) / len(volumes)
+
+
+def build_context_snapshot(market_data) -> ContextSnapshot:
+    """
+    Build enriched ContextSnapshot from market data.
+
+    Rules:
+    - Calculations allowed
+    - Interpretation forbidden
+    """
+
+    # --------------------------------------------------------
+    # Update rolling buffers
+    # --------------------------------------------------------
+    price = getattr(market_data, "price", 0.0)
+    volume = getattr(market_data, "volume", 0.0)
+
+    _price_buffer.append(price)
+    _volume_buffer.append(volume)
+
+    volatility = _compute_volatility(_price_buffer)
+    liquidity = _compute_liquidity(_volume_buffer)
+
+    return ContextSnapshot(
+        ts=getattr(market_data, "ts", 0),
+        regime="UNKNOWN",          # still unknown, no judgment
+        volatility=volatility,
+        liquidity=liquidity,
+    )
+
+============================================================
+
+4. 의도적 제약 (중요)
+
+============================================================
+
+if volatility > x ❌
+
+trend / range 분류 ❌
+
+score, rank ❌
+
+Entry/Exit 호출 ❌
+
+Context는 숫자를 낼 뿐, 의미를 모른다.
+
+============================================================
+
+5. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+threshold
+
+regime decision
+
+confidence
+
+signal
+
+전부 삭제.
+
+============================================================
+
+6. 최종 선언
+
+============================================================
+
+Context는 더 똑똑해졌지만
+
+여전히 판단하지 않는다
+
+V7의 분리 원칙은 유지된다
+
+=================================
+
+## 📍 현재 위치 요약
+- **시장 데이터 → 관측(Context)** : 풍부해짐
+- **판단(Entry/Exit)** : 여전히 최소
+- **실행/상태** : 고정
