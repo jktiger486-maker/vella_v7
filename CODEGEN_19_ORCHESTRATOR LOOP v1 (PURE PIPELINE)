@@ -1,0 +1,209 @@
+# CODEGEN-19 : ORCHESTRATOR LOOP v1 (PURE PIPELINE)
+
+## 목적
+이 문서는 VELLA_V7의 **Orchestrator Loop**를 정의한다.
+
+원칙:
+- 판단 ❌
+- 계산 ❌
+- 전략 ❌
+- 오직 **모듈 호출 순서와 데이터 흐름**만 담당
+
+👉 Orchestrator는 “지휘자”이지, “연주자”가 아니다.
+
+
+============================================================
+## 0. 변경 대상
+============================================================
+
+
+
+vella_v7/orchestrator/orchestrator.py
+
+
+- PIT-3 (Architecture)
+- PIT-6 (Signal contracts)
+- CODEGEN-16 (State Transition)
+- CODEGEN-17 (Execution Gate)
+- CODEGEN-18 (Exchange Adapter)
+
+
+============================================================
+## 1. 전체 흐름 (주인님 확인용)
+============================================================
+
+한 사이클은 아래 순서를 **항상 동일하게** 따른다.
+
+1. Context 수집
+2. Entry 판단 → EntrySignal
+3. Exit 판단 → ExitSignal
+4. Risk 판단 → RiskSignal
+5. State Transition
+6. Execution Gate → OrderIntent
+7. Exchange Adapter → OrderResult
+8. State 유지 (다음 루프)
+
+⚠️ 순서 고정, 생략 없음, 합치기 없음
+
+
+============================================================
+## 2. orchestrator.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-3, PIT-6, CODEGEN-19
+# ============================================================
+
+from typing import Optional
+
+from vella_v7.contracts.contracts import (
+    ContextSnapshot,
+    EngineState,
+    EntrySignal,
+    ExitSignal,
+    RiskSignal,
+)
+
+from vella_v7.modules.context.context import build_context
+from vella_v7.modules.entry.entry import evaluate_entry
+from vella_v7.modules.exit.exit import evaluate_exit
+from vella_v7.modules.risk.risk import evaluate_risk
+
+from vella_v7.modules.state.transition import apply_signal_to_state
+from vella_v7.modules.execution.execution import build_order_intent
+from vella_v7.adapters.exchange.base import ExchangeAdapter
+
+
+class Orchestrator:
+    """
+    Orchestrator Loop v1
+    """
+
+    def __init__(
+        self,
+        initial_state: EngineState,
+        exchange: ExchangeAdapter,
+    ):
+        self.state = initial_state
+        self.exchange = exchange
+
+    def step(self) -> None:
+        """
+        Execute one engine cycle.
+        """
+
+        # ----------------------------------------------------
+        # 1. Context
+        # ----------------------------------------------------
+        context: ContextSnapshot = build_context()
+
+        # ----------------------------------------------------
+        # 2. Entry 판단
+        # ----------------------------------------------------
+        entry_signal: Optional[EntrySignal] = evaluate_entry(
+            context=context,
+            state=self.state,
+        )
+
+        # ----------------------------------------------------
+        # 3. Exit 판단
+        # ----------------------------------------------------
+        exit_signal: Optional[ExitSignal] = evaluate_exit(
+            context=context,
+            state=self.state,
+        )
+
+        # ----------------------------------------------------
+        # 4. Risk 판단
+        # ----------------------------------------------------
+        risk_signal: Optional[RiskSignal] = evaluate_risk(
+            context=context,
+            state=self.state,
+        )
+
+        # ----------------------------------------------------
+        # 5. State Transition (단일 게이트)
+        # ----------------------------------------------------
+        self.state = apply_signal_to_state(
+            state=self.state,
+            entry_signal=entry_signal,
+            exit_signal=exit_signal,
+            risk_signal=risk_signal,
+        )
+
+        # ----------------------------------------------------
+        # 6. Execution Gate
+        # ----------------------------------------------------
+        order_intent = build_order_intent(
+            state=self.state,
+            entry_signal=entry_signal,
+            exit_signal=exit_signal,
+        )
+
+        # ----------------------------------------------------
+        # 7. Exchange Adapter
+        # ----------------------------------------------------
+        if order_intent is not None:
+            self.exchange.submit_order(order_intent)
+
+        # ----------------------------------------------------
+        # 8. Loop end (state persists)
+        # ----------------------------------------------------
+        return
+
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+if/else 로직 추가 ❌
+
+신호 병합 ❌
+
+우선순위 판단 ❌
+
+재시도 ❌
+
+sleep / while ❌
+
+👉 루프 제어는 외부 Runner에서만 한다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+if entry_signal and exit_signal:
+
+risk_signal triggers exit
+
+context 안에서 주문
+
+state 직접 수정
+
+exchange를 여러 번 호출
+
+👉 전부 구조 붕괴
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+VELLA_V7은 파이프라인 엔진이다
+
+판단은 모듈에만 존재한다
+
+Orchestrator는 순서만 보장한다
+
+모든 것은 PIT에서 다시 생성 가능하다
+
+🎉 VELLA_V7 엔진 구조 1차 완성
