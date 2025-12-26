@@ -1,0 +1,173 @@
+# CODEGEN-1 : CONTRACTS.PY (AUTO-GENERATED)
+
+## 목적
+이 문서는 **VELLA_V7에서 사용되는 모든 Contract 타입을
+단일 Python 파일로 생성하는 규칙과 결과물**을 고정한다.
+
+- 이 파일은 **PIT-5의 직접 산출물**이다
+- 다른 어떤 파일도 Contract를 재정의할 수 없다
+- 모든 모듈은 이 파일만 import 한다
+
+
+============================================================
+## 0. 생성 규칙 요약
+============================================================
+
+- Python 표준 `dataclasses` 사용
+- 모든 필드는 **명시적 타입**
+- Optional은 최소화
+- 의미 변경 ❌
+- 필드 추가는 PIT 수정 후 재생성
+
+
+============================================================
+## 1. 생성 대상 파일
+============================================================
+
+vella_v7/contracts/contracts.py
+
+
+- 수동 수정 ❌
+- 이 파일이 바뀌면 모든 모듈 재생성
+
+
+============================================================
+## 2. contracts.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-5 (MODULE CONTRACT TEMPLATES)
+# ============================================================
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, Literal
+
+
+# ============================================================
+# Context Contract
+# ============================================================
+
+@dataclass(frozen=True)
+class ContextSnapshot:
+    ts: int
+    regime: Literal["TREND", "RANGE", "UNKNOWN"]
+    volatility: float
+    liquidity: float
+
+
+# ============================================================
+# Entry Contract
+# ============================================================
+
+@dataclass(frozen=True)
+class EntrySignal:
+    side: Literal["LONG", "SHORT"]
+    confidence: float            # 0.0 ~ 1.0
+    reason: str                  # HUMAN-READABLE (NOT PERSISTED)
+
+
+# ============================================================
+# Exit Contract
+# ============================================================
+
+@dataclass(frozen=True)
+class ExitSignal:
+    exit_type: Literal["TP", "SL", "TIME", "MANUAL"]
+    urgency: float               # 0.0 ~ 1.0
+
+
+# ============================================================
+# Risk Contract
+# ============================================================
+
+@dataclass(frozen=True)
+class RiskProfile:
+    position_size: float
+    stop_loss: float
+    take_profit: float
+
+
+# ============================================================
+# Execution Contracts
+# ============================================================
+
+@dataclass(frozen=True)
+class ExecutionOrder:
+    action: Literal["OPEN", "CLOSE"]
+    side: Optional[Literal["LONG", "SHORT"]]
+    size: float
+    price: Optional[float]       # None = market order
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    filled: bool
+    avg_price: Optional[float]
+    filled_size: Optional[float]
+    error: Optional[str]
+
+
+# ============================================================
+# State Contract
+# ============================================================
+
+@dataclass(frozen=True)
+class EngineState:
+    has_position: bool
+    position_side: Optional[Literal["LONG", "SHORT"]]
+    entry_price: Optional[float]
+    position_size: Optional[float]
+    entry_time: Optional[int]
+
+    last_exit_reason: Optional[str]
+    last_update_ts: int
+
+
+============================================================
+
+3. 사용 규칙 (절대)
+
+============================================================
+
+모든 모듈은:
+
+from vella_v7.contracts.contracts import *
+
+Contract 내부 필드 수정 ❌
+
+의미 재해석 ❌
+
+Contract 상속 ❌
+
+============================================================
+
+4. 실패 방지 체크
+
+============================================================
+
+아래 중 하나라도 발생하면 위반이다.
+
+dict로 Contract 흉내
+
+새로운 필드 임의 추가
+
+Optional 남용
+
+타입 없는 값 전달
+
+→ 전부 PIT 위반
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+Contract는 코드보다 오래 산다
+
+로직은 버려져도 Contract는 남는다
+
+V7은 이 파일을 중심으로만 움직인다
