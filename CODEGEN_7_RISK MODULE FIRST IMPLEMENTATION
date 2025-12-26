@@ -1,0 +1,128 @@
+# CODEGEN-7 : RISK MODULE FIRST IMPLEMENTATION
+
+## 목적
+이 문서는 VELLA_V7의 **risk/risk.py**를 최초로 구현한다.
+
+원칙:
+- 리스크 “계산”의 틀만 제공
+- 전략 ❌
+- 최적화 ❌
+- 실행 ❌
+
+이 단계의 Risk는 **값을 만들어내는 공장**이 아니라,
+**계약을 만족시키는 어댑터**다.
+
+
+============================================================
+## 0. 구현 대상 파일
+============================================================
+
+
+vella_v7/modules/risk/risk.py
+
+
+
+- PIT-5, PIT-6 준수
+- 수동 수정은 문서 변경 후 재생성만 허용
+
+
+============================================================
+## 1. 설계 요약 (주인님 확인용)
+============================================================
+
+- EntrySignal과 ContextSnapshot만 읽는다
+- position_size / stop_loss / take_profit을 **고정 상수**로 반환
+- 이 값들의 “의미”는 아직 없다
+
+👉 목적은 **엔드투엔드 플로우 검증**이다.
+
+
+============================================================
+## 2. risk.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-5, PIT-6
+# ============================================================
+
+from vella_v7.contracts.contracts import (
+    ContextSnapshot,
+    EntrySignal,
+    RiskProfile,
+)
+
+
+def generate_risk_profile(
+    entry_signal: EntrySignal,
+    context: ContextSnapshot,
+) -> RiskProfile:
+    """
+    Minimal risk implementation.
+
+    Rules:
+    - No optimization
+    - No volatility logic
+    - No dynamic sizing
+    """
+
+    # --------------------------------------------------------
+    # Fixed placeholder values
+    # --------------------------------------------------------
+    # These numbers have NO STRATEGIC MEANING.
+    # They exist only to satisfy the contract.
+
+    return RiskProfile(
+        position_size=1.0,
+        stop_loss=0.0,
+        take_profit=0.0,
+    )
+
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+비중 계산 ❌
+
+손익비 계산 ❌
+
+volatility 사용 ❌
+
+confidence 반영 ❌
+
+Risk는 계산기처럼 보이지만,
+지금은 전원만 들어온 상태다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+if entry_signal.confidence >
+
+ATR, VAR, DD
+
+Kelly, leverage
+
+optimize, adjust
+
+전부 삭제.
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+Risk는 전략이 아니다
+
+Risk는 규칙의 그릇이다
+
+의미는 다음 단계에서만 들어온다
