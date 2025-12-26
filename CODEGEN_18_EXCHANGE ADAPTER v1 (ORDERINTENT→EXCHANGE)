@@ -1,0 +1,180 @@
+# CODEGEN-18 : EXCHANGE ADAPTER v1 (ORDERINTENT → EXCHANGE)
+
+## 목적
+이 문서는 VELLA_V7에서 **거래소 연결을 담당하는 유일 계층**을 정의한다.
+
+원칙:
+- 판단 ❌
+- 상태 변경 ❌
+- 전략 ❌
+- 오직 **OrderIntent → 실제 주문 호출**만 수행
+
+👉 거래소는 교체 가능해야 한다.
+
+
+============================================================
+## 0. 변경 대상
+============================================================
+
+vella_v7/adapters/exchange/base.py
+vella_v7/adapters/exchange/mock.py
+vella_v7/adapters/exchange/binance.py
+
+
+- CODEGEN-17 (Execution Gate) 이후 단계
+- Entry / Exit / Risk / State 접근 ❌
+- 판단 로직 ❌
+
+
+============================================================
+## 1. 설계 핵심 (주인님 확인용)
+============================================================
+
+- Execution은 **OrderIntent만 생성**
+- Adapter는 **그 주문을 어떻게 낼지**만 책임
+- Binance / Mock / Testnet 교체 가능
+- 실패/응답은 Result 객체로 반환
+
+
+============================================================
+## 2. base.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-6, CODEGEN-18
+# ============================================================
+
+from abc import ABC, abstractmethod
+from typing import Optional
+from vella_v7.contracts.contracts import OrderIntent, OrderResult
+
+
+class ExchangeAdapter(ABC):
+    """
+    Exchange Adapter Interface
+    """
+
+    @abstractmethod
+    def submit_order(self, intent: OrderIntent) -> OrderResult:
+        """
+        Submit an order intent to the exchange.
+
+        Must NOT:
+        - modify state
+        - decide strategy
+        - retry logic (handled elsewhere)
+        """
+        pass
+
+
+============================================================
+
+3. mock.py (FULL CONTENT)
+
+============================================================
+
+
+# ============================================================
+# MOCK EXCHANGE — FOR STRUCTURE VERIFICATION ONLY
+# ============================================================
+
+from vella_v7.adapters.exchange.base import ExchangeAdapter
+from vella_v7.contracts.contracts import OrderIntent, OrderResult
+
+
+class MockExchangeAdapter(ExchangeAdapter):
+    """
+    Mock adapter: does NOT touch real exchange.
+    """
+
+    def submit_order(self, intent: OrderIntent) -> OrderResult:
+        return OrderResult(
+            success=True,
+            order_id="MOCK-ORDER-001",
+            filled_qty=intent.qty,
+            filled_price=intent.price,
+            raw_response={"mock": True},
+        )
+
+
+============================================================
+
+4. binance.py (SKELETON ONLY)
+
+============================================================
+
+# ============================================================
+# BINANCE ADAPTER — IMPLEMENTATION SKELETON
+# ============================================================
+
+from vella_v7.adapters.exchange.base import ExchangeAdapter
+from vella_v7.contracts.contracts import OrderIntent, OrderResult
+
+
+class BinanceExchangeAdapter(ExchangeAdapter):
+    """
+    Binance Futures Adapter (Skeleton)
+
+    NOTE:
+    - Actual API logic implemented in later CODEGEN
+    """
+
+    def submit_order(self, intent: OrderIntent) -> OrderResult:
+        raise NotImplementedError("Binance adapter not implemented yet")
+
+
+============================================================
+
+5. 의도적 제약 (중요)
+
+============================================================
+
+재시도 ❌
+
+슬리피지 계산 ❌
+
+주문 최적화 ❌
+
+리스크 판단 ❌
+
+Adapter는 순수 I/O 계층이다.
+
+============================================================
+
+6. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+if pnl > ...
+
+if regime == ...
+
+state.has_position
+
+dynamic qty 계산
+
+전략 파라미터
+
+👉 전부 금지
+
+============================================================
+
+7. 최종 선언
+
+============================================================
+
+전략/판단/상태/실행이 완전히 분리되었다
+
+거래소 교체가 구조적으로 가능해졌다
+
+VELLA_V7의 엔진 골격이 완성되었다
+
+다음 단계는 선택이다:
+
+CODEGEN-19 : ORCHESTRATOR LOOP
+
+CODEGEN-20 : BINANCE REAL IMPLEMENTATION
