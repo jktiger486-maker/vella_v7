@@ -1,0 +1,172 @@
+# CODEGEN-16 : STATE TRANSITION v1 (SINGLE GATE)
+
+## 목적
+이 문서는 VELLA_V7에서 **상태(State)가 변경될 수 있는
+유일한 통로(State Transition Gate)** 를 정의한다.
+
+원칙:
+- 판단 ❌
+- 계산 ❌
+- 전략 ❌
+- 오직 "Signal → State 반영"만 수행
+
+👉 State 오염을 구조적으로 차단한다.
+
+
+============================================================
+## 0. 변경 대상
+============================================================
+
+vella_v7/modules/state/transition.py
+
+
+- PIT-5 (State rule) 절대 준수
+- PIT-6 (Signal contract) 절대 준수
+- Entry / Exit / Risk 판단 침범 ❌
+- Execution 호출 ❌
+
+
+============================================================
+## 1. 설계 핵심 (주인님 확인용)
+============================================================
+
+- Entry / Exit / Risk 모듈은 **Signal만 반환**
+- State 변경은 이 파일에서만 허용
+- 모든 Signal은 **명시적 분기**로 처리
+- 암묵적 처리 / 자동 처리 / 편의 로직 ❌
+
+
+============================================================
+## 2. transition.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-5, PIT-6, CODEGEN-16
+# ============================================================
+
+from typing import Optional
+from vella_v7.contracts.contracts import (
+    EngineState,
+    EntrySignal,
+    ExitSignal,
+    RiskSignal,
+)
+
+
+def apply_signal_to_state(
+    state: EngineState,
+    entry_signal: Optional[EntrySignal] = None,
+    exit_signal: Optional[ExitSignal] = None,
+    risk_signal: Optional[RiskSignal] = None,
+) -> EngineState:
+    """
+    Single State Transition Gate (v1)
+
+    Rules:
+    - One signal type at a time
+    - Explicit branching
+    - No implicit mutation
+    """
+
+    # --------------------------------------------------------
+    # Copy state (immutability guarantee)
+    # --------------------------------------------------------
+    new_state = state.copy()
+
+    # --------------------------------------------------------
+    # Entry Signal
+    # --------------------------------------------------------
+    if entry_signal is not None:
+        if new_state.has_position:
+            return new_state  # ignore illegal entry
+
+        new_state.has_position = True
+        new_state.side = entry_signal.side
+        new_state.entry_price = entry_signal.price
+        new_state.entry_time = entry_signal.timestamp
+        new_state.tp1_filled = False
+        new_state.trailing_active = False
+        new_state.remaining_qty = entry_signal.qty
+
+        return new_state
+
+    # --------------------------------------------------------
+    # Exit Signal
+    # --------------------------------------------------------
+    if exit_signal is not None:
+        if not new_state.has_position:
+            return new_state  # nothing to exit
+
+        new_state.has_position = False
+        new_state.side = None
+        new_state.entry_price = None
+        new_state.entry_time = None
+        new_state.tp1_filled = False
+        new_state.trailing_active = False
+        new_state.remaining_qty = 0.0
+
+        return new_state
+
+    # --------------------------------------------------------
+    # Risk Signal
+    # --------------------------------------------------------
+    if risk_signal is not None:
+        # v1: risk does NOT mutate state
+        # reserved for future escalation rules
+        return new_state
+
+    # --------------------------------------------------------
+    # No signal
+    # --------------------------------------------------------
+    return new_state
+
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+자동 전이 ❌
+
+다중 Signal 병합 ❌
+
+State 직접 수정 ❌
+
+Execution 연동 ❌
+
+State는 판단하지 않고,
+Signal만 반영한다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 구조 붕괴다.
+
+state.has_position = True 를 다른 파일에서 수행
+
+판단 if/else 가 State 안에 존재
+
+RiskSignal이 Exit을 강제
+
+👉 전부 위반
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+State 변경 통로는 단 하나다
+
+모든 전략은 Signal로만 말한다
+
+State는 더 이상 더러워질 수 없다
+
+다음 단계에서
+Execution이 이 State를 “읽기만” 하게 된다
