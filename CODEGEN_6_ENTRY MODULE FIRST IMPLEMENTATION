@@ -1,0 +1,135 @@
+# CODEGEN-6 : ENTRY MODULE FIRST IMPLEMENTATION
+
+## 목적
+이 문서는 VELLA_V7의 **entry/entry.py**를 최초로 구현한다.
+
+원칙:
+- 진입 판단만 한다
+- 계산 최소
+- 상태 수정 ❌
+- 실행 ❌
+
+이 단계의 Entry는 **아무 전략도 아니다**.
+“신호를 낼 수 있는 최소 형식”만 확정한다.
+
+
+============================================================
+## 0. 구현 대상 파일
+============================================================
+
+vella_v7/modules/entry/entry.py
+
+
+
+- PIT-4, PIT-5, PIT-6 준수
+- 수동 수정은 문서 변경 후 재생성만 허용
+
+
+============================================================
+## 1. 설계 요약 (주인님 확인용)
+============================================================
+
+- ContextSnapshot과 EngineState만 읽는다
+- 조건은 **존재 여부** 수준으로만 사용
+- confidence는 **고정 상수** (의미 없음)
+
+이 구현은:
+- “엔진이 돌아간다”를 확인하기 위한 **시동키**다.
+
+
+============================================================
+## 2. entry.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-5, PIT-6
+# ============================================================
+
+from typing import Optional
+from vella_v7.contracts.contracts import (
+    ContextSnapshot,
+    EntrySignal,
+    EngineState,
+)
+
+
+def generate_entry_signal(
+    context: ContextSnapshot,
+    state: EngineState,
+) -> Optional[EntrySignal]:
+    """
+    Minimal entry implementation.
+
+    Rules:
+    - No strategy
+    - No thresholds
+    - No state mutation
+    """
+
+    # --------------------------------------------------------
+    # Guard: do not enter if already in position
+    # --------------------------------------------------------
+    if state.has_position:
+        return None
+
+    # --------------------------------------------------------
+    # Minimal placeholder signal
+    # --------------------------------------------------------
+    # This is NOT a strategy.
+    # It exists only to validate end-to-end flow.
+
+    return EntrySignal(
+        side="SHORT",
+        confidence=0.1,
+        reason="CODEGEN-6 minimal entry placeholder",
+    )
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+가격 조건 ❌
+
+EMA / ATR / RSI ❌
+
+Regime 해석 ❌
+
+confidence 의미 부여 ❌
+
+이 Entry는 곧 버려질 전구다.
+전선 연결만 확인한다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+if context.volatility >
+
+score 계산
+
+trend 판단
+
+포지션 크기 결정
+
+보이면 삭제.
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+Entry는 판단의 “입구”다
+
+지금은 문만 달았다
+
+다음 단계에서만 전략이 들어온다
+
