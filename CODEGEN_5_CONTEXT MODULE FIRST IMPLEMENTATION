@@ -1,0 +1,123 @@
+# CODEGEN-5 : CONTEXT MODULE FIRST IMPLEMENTATION
+
+## 목적
+이 문서는 VELLA_V7의 **context/context.py**를 최초로 구현한다.
+
+원칙:
+- 관측만 한다
+- 판단 ❌
+- 점수화 ❌
+- 진입/청산 개입 ❌
+
+Context는 “시장 스냅샷”을 **사실 그대로** 제공한다.
+
+
+============================================================
+## 0. 구현 대상 파일
+============================================================
+
+vella_v7/modules/context/context.py
+
+
+- PIT-3, PIT-5, PIT-6 준수
+- 수동 수정은 문서 변경 후 재생성만 허용
+
+
+============================================================
+## 1. 설계 요약 (주인님 확인용)
+============================================================
+
+Context는:
+- MarketData → ContextSnapshot 변환기
+- 수치의 **의미 해석 없음**
+- 임계값/전략 규칙 없음
+
+Regime은 **미분류(UNKNOWN)** 로 시작한다.
+(분류 로직은 이후 단계에서 추가)
+
+
+============================================================
+## 2. context.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-3, PIT-5, PIT-6
+# ============================================================
+
+from vella_v7.contracts.contracts import ContextSnapshot
+
+
+def build_context_snapshot(market_data) -> ContextSnapshot:
+    """
+    Build ContextSnapshot from raw market data.
+
+    Rules:
+    - Observation only
+    - No thresholds
+    - No regime logic (yet)
+    """
+
+    # NOTE:
+    # market_data is treated as an opaque carrier.
+    # This module does not validate or interpret its structure.
+
+    ts = getattr(market_data, "ts", 0)
+
+    volatility = getattr(market_data, "volatility", 0.0)
+    liquidity = getattr(market_data, "liquidity", 0.0)
+
+    return ContextSnapshot(
+        ts=ts,
+        regime="UNKNOWN",
+        volatility=volatility,
+        liquidity=liquidity,
+    )
+
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+EMA, ATR, RSI 계산 ❌
+
+Regime 분류 ❌
+
+임계값 비교 ❌
+
+스코어링 ❌
+
+Context는 데이터를 본다, 생각하지 않는다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 위반이다.
+
+if volatility >
+
+trend / range 판정
+
+confidence 생성
+
+entry/exit 관련 단어
+
+보이면 즉시 삭제.
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+Context는 시장을 관측한다
+
+Context는 전략을 모른다
+
+이 모듈은 이후 확장돼도 판단을 갖지 않는다
