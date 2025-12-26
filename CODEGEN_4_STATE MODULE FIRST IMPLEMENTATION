@@ -1,0 +1,183 @@
+# CODEGEN-4 : STATE MODULE FIRST IMPLEMENTATION
+
+## 목적
+이 문서는 VELLA_V7의 **state/state.py를 최초로 구현**한다.
+
+원칙:
+- 사실만 기록
+- 해석 없음
+- 판단 없음
+- 계산 없음
+
+State가 흔들리면 엔진 전체가 무너진다.
+그래서 **가장 먼저, 가장 단순하게** 만든다.
+
+
+============================================================
+## 0. 구현 대상 파일
+============================================================
+
+vella_v7/modules/state/state.py
+
+
+- PIT-3, PIT-5, PIT-6 준수
+- 수동 수정은 이 문서 변경 후 재생성만 허용
+
+
+============================================================
+## 1. 설계 요약 (주인님 확인용)
+============================================================
+
+State는:
+- ExecutionResult를 **그대로 반영**
+- 실패/성공을 **판단하지 않음**
+- “왜”를 저장하지 않음
+
+Event 타입은 문자열로만 전달:
+- "ENTRY"
+- "EXIT"
+
+
+============================================================
+## 2. state.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-3, PIT-5, PIT-6
+# ============================================================
+
+from typing import Optional
+from vella_v7.contracts.contracts import EngineState, ExecutionResult
+
+
+def update_state(
+    prev_state: EngineState,
+    execution_result: ExecutionResult,
+    event_type: str,
+) -> EngineState:
+    """
+    Update EngineState with execution result.
+
+    Rules:
+    - Facts only
+    - No interpretation
+    - No decision logic
+    """
+
+    ts = prev_state.last_update_ts + 1  # monotonic update marker
+
+    # --------------------------------------------------------
+    # ENTRY EVENT
+    # --------------------------------------------------------
+    if event_type == "ENTRY":
+        if not execution_result.filled:
+            # Entry failed → state unchanged except timestamp
+            return EngineState(
+                has_position=prev_state.has_position,
+                position_side=prev_state.position_side,
+                entry_price=prev_state.entry_price,
+                position_size=prev_state.position_size,
+                entry_time=prev_state.entry_time,
+                last_exit_reason=prev_state.last_exit_reason,
+                last_update_ts=ts,
+            )
+
+        # Entry success → record facts
+        return EngineState(
+            has_position=True,
+            position_side=prev_state.position_side,
+            entry_price=execution_result.avg_price,
+            position_size=execution_result.filled_size,
+            entry_time=ts,
+            last_exit_reason=None,
+            last_update_ts=ts,
+        )
+
+    # --------------------------------------------------------
+    # EXIT EVENT
+    # --------------------------------------------------------
+    if event_type == "EXIT":
+        if not execution_result.filled:
+            # Exit failed → state unchanged except timestamp
+            return EngineState(
+                has_position=prev_state.has_position,
+                position_side=prev_state.position_side,
+                entry_price=prev_state.entry_price,
+                position_size=prev_state.position_size,
+                entry_time=prev_state.entry_time,
+                last_exit_reason=prev_state.last_exit_reason,
+                last_update_ts=ts,
+            )
+
+        # Exit success → clear position facts
+        return EngineState(
+            has_position=False,
+            position_side=None,
+            entry_price=None,
+            position_size=None,
+            entry_time=None,
+            last_exit_reason=event_type,
+            last_update_ts=ts,
+        )
+
+    # --------------------------------------------------------
+    # UNKNOWN EVENT (SAFE FALLBACK)
+    # --------------------------------------------------------
+    return EngineState(
+        has_position=prev_state.has_position,
+        position_side=prev_state.position_side,
+        entry_price=prev_state.entry_price,
+        position_size=prev_state.position_size,
+        entry_time=prev_state.entry_time,
+        last_exit_reason=prev_state.last_exit_reason,
+        last_update_ts=ts,
+    )
+
+
+============================================================
+
+3. 의도적 제약 (중요)
+
+============================================================
+
+가격 비교 ❌
+
+손익 계산 ❌
+
+성공/실패 의미 부여 ❌
+
+전략적 해석 ❌
+
+State는 블랙박스 기록지다.
+
+============================================================
+
+4. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+pnl, profit, loss
+
+if price >
+
+reason 분석
+
+confidence 반영
+
+State는 아무것도 모른다.
+
+============================================================
+
+5. 최종 선언
+
+============================================================
+
+이제 V7은 “기억”을 가진다
+
+기억은 판단하지 않는다
+
+이후 모든 모듈은 이 기억 위에 안전하게 올라탄다
