@@ -1,0 +1,187 @@
+# CODEGEN_21_LOGGING & OBSERVABILITY v1 (WRITE-ONLY)
+
+## 목적
+이 문서는 VELLA_V7의 **관측(Observability) 계층**을 정의한다.
+
+원칙:
+- 판단 ❌
+- 전략 ❌
+- 상태 변경 ❌
+- 계산 ❌
+- 오직 **사실(Event) 기록**만 수행
+
+👉 로그는 두뇌가 아니다. 블랙박스다.
+
+
+============================================================
+## 0. 변경 대상
+============================================================
+
+vella_v7/observability/logger.py
+
+
+- CODEGEN-19 (Orchestrator)
+- CODEGEN-20 (Runner)
+- 어느 모듈에도 영향 주면 ❌
+
+
+============================================================
+## 1. 설계 핵심 (주인님 확인용)
+============================================================
+
+- Logger는 **읽지 않는다**
+- Logger는 **반환하지 않는다**
+- Logger는 **조건 판단을 하지 않는다**
+- 호출자는 “그냥 던지고 잊는다(fire-and-forget)”
+
+👉 관측은 항상 **부작용(side-effect)** 이다.
+
+
+============================================================
+## 2. logger.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-3, CODEGEN-21
+# ============================================================
+
+import json
+import time
+from typing import Any, Dict
+
+
+class EventLogger:
+    """
+    Write-only Event Logger v1
+    """
+
+    def __init__(self, sink: str = "stdout"):
+        self.sink = sink
+
+    def log(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """
+        Record an event.
+
+        Rules:
+        - No condition
+        - No transformation
+        - No return value
+        """
+
+        record = {
+            "ts": int(time.time() * 1000),
+            "event": event_type,
+            "data": payload,
+        }
+
+        self._emit(record)
+
+    def _emit(self, record: Dict[str, Any]) -> None:
+        """
+        Emit log record to sink.
+        """
+        if self.sink == "stdout":
+            print(json.dumps(record, ensure_ascii=False))
+        else:
+            # future sinks: file, kafka, db
+            print(json.dumps(record, ensure_ascii=False))
+
+
+============================================================
+
+3. 로그 이벤트 규약 (중요)
+
+============================================================
+
+이벤트 타입은 문자열 상수로만 사용
+
+예:
+
+ENGINE_STEP_START
+
+ENGINE_STEP_END
+
+ENTRY_SIGNAL_EMITTED
+
+EXIT_SIGNAL_EMITTED
+
+RISK_SIGNAL_EMITTED
+
+ORDER_INTENT_BUILT
+
+ORDER_SUBMITTED
+
+⚠️ Logger는 이벤트 의미를 모른다.
+
+============================================================
+
+4. Orchestrator 연동 규칙
+
+============================================================
+
+Orchestrator는 logger.log(...) 호출만 가능
+
+logger 반환값 사용 ❌
+
+logger 결과로 분기 ❌
+
+예 (의미 설명용):
+
+logger.log("ENTRY_SIGNAL_EMITTED", {
+    "side": entry_signal.side,
+    "price": entry_signal.price,
+})
+
+
+👉 판단은 이미 끝난 후 기록만 한다.
+
+============================================================
+
+5. 의도적 제약 (중요)
+
+============================================================
+
+if logger... ❌
+
+로그 기반 재시도 ❌
+
+로그 기반 상태 변경 ❌
+
+로깅 실패 처리 ❌
+
+로깅이 죽어도 엔진은 계속 돈다.
+
+============================================================
+
+6. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+logger returns something
+
+logger decides severity
+
+logger filters events
+
+logger touches EngineState
+
+👉 전부 구조 붕괴
+
+============================================================
+
+7. 최종 선언
+
+============================================================
+
+관측 계층이 엔진에서 완전히 분리되었다
+
+실전/디버그/리플레이가 가능해졌다
+
+VELLA_V7은 보이는 엔진이 되었다
+
+다음 단계:
+CODEGEN-22 : BINANCE REAL ADAPTER v1
