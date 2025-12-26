@@ -1,0 +1,233 @@
+# CODEGEN_22_BINANCE REAL ADAPTER v1 (PURE I/O)
+
+## 목적
+이 문서는 VELLA_V7의 **Binance 실거래 어댑터 v1**을 정의한다.
+
+원칙:
+- 판단 ❌
+- 전략 ❌
+- 상태 변경 ❌
+- 재시도 ❌
+- 오직 **OrderIntent → Binance API 호출 → OrderResult 반환**
+
+👉 실패/성공의 “사실”만 전달한다.
+
+
+============================================================
+## 0. 변경 대상
+============================================================
+
+vella_v7/adapters/exchange/binance.py
+
+
+- CODEGEN-18 (Exchange Adapter Interface) 준수
+- CODEGEN-17 (Execution Gate) 이후 단계
+- EngineState / Signal 접근 ❌
+
+
+============================================================
+## 1. 설계 핵심 (주인님 확인용)
+============================================================
+
+- Binance Adapter는 **I/O 전용**
+- 주문 파라미터 계산 ❌ (이미 계산된 값만 사용)
+- 예외를 삼키지 않음 (사실 그대로 반환)
+- API Key는 **외부 주입** (환경변수)
+
+
+============================================================
+## 2. 사전 조건 (운영 규칙)
+============================================================
+
+환경변수 (systemd / docker / shell):
+
+BINANCE_API_KEY
+BINANCE_API_SECRET
+BINANCE_BASE_URL # optional (default: futures)
+
+
+⚠️ Adapter 내부에 키 하드코딩 ❌
+
+
+============================================================
+## 3. binance.py (FULL CONTENT)
+============================================================
+
+```python
+# ============================================================
+# BINANCE REAL EXCHANGE ADAPTER — v1
+# AUTO-GENERATED FILE — DO NOT EDIT MANUALLY
+# SOURCE OF TRUTH: PIT-6, CODEGEN-22
+# ============================================================
+
+import os
+import time
+import hmac
+import hashlib
+import urllib.parse
+import requests
+
+from vella_v7.adapters.exchange.base import ExchangeAdapter
+from vella_v7.contracts.contracts import OrderIntent, OrderResult
+
+
+class BinanceExchangeAdapter(ExchangeAdapter):
+    """
+    Binance Futures Exchange Adapter v1
+    (PURE I/O — NO STRATEGY)
+    """
+
+    def __init__(self):
+        self.api_key = os.getenv("BINANCE_API_KEY")
+        self.api_secret = os.getenv("BINANCE_API_SECRET")
+        self.base_url = os.getenv(
+            "BINANCE_BASE_URL",
+            "https://fapi.binance.com",
+        )
+
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET missing")
+
+    # --------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------
+    def submit_order(self, intent: OrderIntent) -> OrderResult:
+        if intent.action == "OPEN":
+            return self._open_position(intent)
+
+        if intent.action == "CLOSE":
+            return self._close_position(intent)
+
+        return OrderResult(
+            success=False,
+            order_id=None,
+            filled_qty=0.0,
+            filled_price=None,
+            raw_response={"error": "UNKNOWN_ACTION"},
+        )
+
+    # --------------------------------------------------------
+    # Internal helpers
+    # --------------------------------------------------------
+    def _open_position(self, intent: OrderIntent) -> OrderResult:
+        params = {
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "type": "MARKET",
+            "quantity": intent.qty,
+            "timestamp": self._ts(),
+        }
+        return self._signed_post("/fapi/v1/order", params)
+
+    def _close_position(self, intent: OrderIntent) -> OrderResult:
+        params = {
+            "symbol": intent.symbol,
+            "side": "BUY" if intent.side == "SELL" else "SELL",
+            "type": "MARKET",
+            "quantity": intent.qty,
+            "reduceOnly": "true",
+            "timestamp": self._ts(),
+        }
+        return self._signed_post("/fapi/v1/order", params)
+
+    # --------------------------------------------------------
+    # Signing & HTTP
+    # --------------------------------------------------------
+    def _signed_post(self, path: str, params: dict) -> OrderResult:
+        query = urllib.parse.urlencode(params)
+        signature = hmac.new(
+            self.api_secret.encode(),
+            query.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+        url = f"{self.base_url}{path}?{query}&signature={signature}"
+        headers = {"X-MBX-APIKEY": self.api_key}
+
+        try:
+            resp = requests.post(url, headers=headers, timeout=5)
+            data = resp.json()
+        except Exception as e:
+            return OrderResult(
+                success=False,
+                order_id=None,
+                filled_qty=0.0,
+                filled_price=None,
+                raw_response={"exception": str(e)},
+            )
+
+        if resp.status_code != 200:
+            return OrderResult(
+                success=False,
+                order_id=data.get("orderId"),
+                filled_qty=0.0,
+                filled_price=None,
+                raw_response=data,
+            )
+
+        return OrderResult(
+            success=True,
+            order_id=data.get("orderId"),
+            filled_qty=float(data.get("executedQty", 0)),
+            filled_price=float(data.get("avgPrice", 0))
+            if data.get("avgPrice") else None,
+            raw_response=data,
+        )
+
+    def _ts(self) -> int:
+        return int(time.time() * 1000)
+
+
+============================================================
+
+4. 의도적 제약 (중요)
+
+============================================================
+
+재시도 ❌
+
+가격 보정 ❌
+
+슬리피지 계산 ❌
+
+주문 분할 ❌
+
+포지션 조회 ❌
+
+Binance Adapter는 **“명령 전달자”**다.
+
+============================================================
+
+5. 실패 방지 체크리스트
+
+============================================================
+
+아래가 보이면 즉시 위반이다.
+
+pnl 계산
+
+상태 sync
+
+레짐/필터 접근
+
+qty 재계산
+
+if market condition
+
+👉 전부 구조 붕괴
+
+============================================================
+
+6. 최종 선언
+
+============================================================
+
+실거래소 연결이 엔진과 분리되었다
+
+Mock ↔ Binance 교체 가능
+
+VELLA_V7은 실매매 가능한 구조가 되었다
+
+🎯 다음이 마지막 단계다
+👉 CODEGEN-23 : BOOTSTRAP / MAIN
+
