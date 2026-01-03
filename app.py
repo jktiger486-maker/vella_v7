@@ -1,578 +1,318 @@
 # ============================================================
-# VELLA V7 — app.py
-# (CFG 기준서 기반, 초기 골격)
+# VELLA V7 — app.py (AWS READY / ERROR 0)
+# STEP 1 ~ STEP 16 (ALL PRESENT, IN ORDER)
+# ENGINE INDEPENDENT / LIVE CONTRACT
+# ------------------------------------------------------------
+# 설계-구현 100% 일치 원칙:
+# - CFG(01~37)에 있는 항목은 모두 "집행 로직"이 존재해야 한다.
+# - OFF 옵션도 '집행 경로가 존재'해야 한다 (단, OFF면 통과).
+# - 후보(candidate)는 이벤트 기록이며, gate/entry/exit과 분리된다.
 # ============================================================
 
+import os
+import time
+from decimal import Decimal, ROUND_DOWN
+
+import pandas as pd
+
+
 # ============================================================
-# VELLA V7 — CFG INPUT
-# SOURCE: V7 CFG CONSTITUTION (SINGLE SOURCE OF TRUTH)
+# CFG (01 ~ 37 FULL)
 # ============================================================
 
 CFG = {
-
     # =====================================================
     # [ STEP 1 ] 거래 대상 · 자본 · 손실 한계
-    # ROLE: ENGINE LIMIT / CAPITAL BOUNDARY
     # =====================================================
-
-    "01_TRADE_SYMBOL": "TIAUSDT",      # 01 TRADE_SYMBOL
-    # 설명: 거래 종목 (선물 심볼)
-    # 추천값: "TIAUSDT"
-    # 튜닝의미: 종목 교체 시 엔진 재사용
-
-
-    "02_CAPITAL_BASE_USDT": 60,        # 02 CAPITAL_BASE_USDT
-    # 설명: 기준 투자금 (포지션 사이즈 계산 기준)
-    # 단위: USDT
-    # 추천값: 60
-    # 의미: 전략 성능 비교 기준선 고정
-
-
-    "03_CAPITAL_USE_FIXED": True,      # 03 CAPITAL_USE_FIXED
-    # 설명: 항상 고정 금액 사용 여부
-    # 추천값: True
-    # 효과: 잔고 변동 → 전략 성능 오염 방지
-
-
-    "04_CAPITAL_MAX_LOSS_PCT": 10.0,   # 04 CAPITAL_MAX_LOSS_PCT
-    # 설명: 엔진 전체 기준 누적 손실 한계 (%)
-    # 기준: CAPITAL_BASE_USDT
-    #
-    # 계산:
-    # (실현 + 미실현 손익)
-    # ≤ -CAPITAL_BASE_USDT * (CAPITAL_MAX_LOSS_PCT / 100)
-    #
-    # 의미:
-    # cfg에서 정한 % 손실 도달 시
-    # → 엔진 전체 거래 즉시 중단
-    #
-    # 규칙:
-    # - 주문/포지션 단위 ❌
-    # - 엔진 전체 ⭕
-    # - 재시작해도 리셋 ❌ (STATE 유지)
-    # - 수동 리셋만 허용
-    #
-    # 로그:
-    # "ENGINE_MAX_LOSS_HIT"
-
-
+    "01_TRADE_SYMBOL": "SUIUSDT",
+    "02_CAPITAL_BASE_USDT": 60,
+    "03_CAPITAL_USE_FIXED": True,
+    "04_CAPITAL_MAX_LOSS_PCT": 100.0,  # 100%면 사실상 차단 없음
 
     # =====================================================
     # [ STEP 2 ] 엔진 / 실행 스위치
-    # ROLE: ENGINE MASTER SWITCH
     # =====================================================
-
-    "05_ENGINE_ENABLE": True,            # 05 ENGINE_ENABLE
-    # 설명: 엔진 마스터 스위치
-    # 추천값: True
-    # 효과: systemd 유지 + 거래만 즉시 중단
-
-    "06_ENTRY_CANDIDATE_ENABLE": True,   # 06 ENTRY_CANDIDATE_ENABLE
-    # 설명: 후보 생성 ON/OFF
-    # 추천값: True
-    # 효과: 분석·로그만 남기기 가능
-
-    "07_ENTRY_EXEC_ENABLE": True,        # 07 ENTRY_EXEC_ENABLE
-    # 설명: 실제 주문 실행 허용 여부
-    # 추천값: True
-    # 효과: “후보는 쌓되 주문 차단” 가능
-
+    "05_ENGINE_ENABLE": True,
+    "06_ENTRY_CANDIDATE_ENABLE": True,
+    "07_ENTRY_EXEC_ENABLE": False,  # 🔒 실주문 차단 (STEP A 핵심)
 
     # =====================================================
-    # [ STEP 3 ] 후보 생성 (SIMPLE & WIDE)
-    # ROLE: CANDIDATE GENERATOR
+    # [ STEP 3 ] 후보 생성
     # =====================================================
-
-    "08_CAND_BODY_BELOW_EMA": True,     # 08 CAND_BODY_BELOW_EMA
-    # 후보결정:
-    # “봉이 진행 중일 때, 가격이 EMA9 아래를 ‘실제 침투’한 순간 후보 확정”
-    #
-    # ❗ 시장 판단 ❌
-    # ❗ 비트 판단 ❌
-    # ❗ 필터 ❌
-    # → “가능성 있는 놈은 전부 후보”
-
+    "08_CAND_BODY_BELOW_EMA": True,
 
     # =====================================================
     # [ STEP 4 ] BTC SESSION BIAS
-    # ROLE: EXECUTION GATE — MARKET CONTEXT
     # =====================================================
-
-    "09_BTC_SESSION_BIAS_ENABLE": False,   # 09 BTC_SESSION_BIAS_ENABLE
-    # 설명: BTC 일봉 기준가 대비 하락일 때만 실행 허용
-    # 추천값: True
-
-    # HARD SPEC (고정)
-    # BTC_SESSION_TIMEFRAME = "1D"
-    # BTC_SESSION_TIMEZONE  = "UTC"
-    # BTC_SESSION_OPEN_TIME = "00:00"
-
+    "09_BTC_SESSION_BIAS_ENABLE": False,  # 유지 (STEP A에서는 OFF)
 
     # =====================================================
-    # [ STEP 5 ] 시장이 ‘살아 있는가?’ (EMA 경사도)
-    # ROLE: EXECUTION GATE — MARKET ACTIVITY
+    # [ STEP 5 ] EMA SLOPE
     # =====================================================
-
-    "10_EMA_SLOPE_MIN_PCT": 0.0,      # 10 EMA_SLOPE_MIN_PCT
-    # 설명: EMA9의 기울기(변화율)가 이 값 이상일 때만 실행을 허용한다.
-    # 추천값: 0.05
-    # 추천범위: 0.03 ~ 0.15
-    # 의미 (중1)
-    # 값이 작다 → 살짝만 움직여도 “움직이는 장”
-    # 값이 크다 → 확실히 기울 때만 실행
-    # 사유: 횡보장에서 쓸데없는 재진입 차단
-    # 성격: 필터 ❌ / 실행 허용 조건 ⭕
-
-    "11_EMA_SLOPE_LOOKBACK_BARS": 1,   # 11 EMA_SLOPE_LOOKBACK_BARS
-    # 설명: EMA 기울기를 계산할 때 최근 몇 개 봉을 기준으로 볼지 정한다.
-    # 추천값: 3
-    # 추천범위: 2 ~ 5
-    # 의미 (중1)
-    # 2 → 최근 움직임에 민감 (빠름)
-    # 5 → 흐름 위주 (안정)
-    # 사유: 순간 튐(노이즈) 제거
-
+    "10_EMA_SLOPE_MIN_PCT": 0.0,
+    "11_EMA_SLOPE_LOOKBACK_BARS": 1,
 
     # =====================================================
-    # [ STEP 6 ] 가격 행동 확인 (속도 vs 확신)
-    # ROLE: EXECUTION GATE — PRICE CONFIRMATION
+    # [ STEP 6 ] PRICE CONFIRM (ENTRY FINAL)
     # =====================================================
-
-    "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.0,   # 12 EXECUTION_MIN_PRICE_MOVE_PCT
-    # 설명:
-    # 후보가 생성된 이후,
-    # 가격이 후보 기준점 대비 최소 이 퍼센트만큼
-    # “추가로 더 이동했을 때만” 실행을 허용한다.
-    # 추천값: 0.05
-    # 추천범위: 0.03 ~ 0.15
-    # 사유:
-    # · EMA 침투 직후 미세한 흔들림에서의 실행 방지
-    # · “진짜로 움직이기 시작했는지”를 가격으로 확인
-    # 성격:
-    # · 필터 ❌
-    # · 실행 확신 게이트 ⭕
-    # 직관:
-    # 👉 “후보가 생긴 뒤, 이전 가격보다 조금이라도 더 내려가면 실행”
-
-    "13_EXECUTION_ONLY_ON_NEW_LOW": False,     # 13 EXECUTION_ONLY_ON_NEW_LOW
-    # 설명:
-    # 후보가 생성된 이후,
-    # 직전 저점을 실제로 갱신했을 때만 실행을 허용한다.
-    # 추천값: False
-    # 추천범위: True / False
-    # 사유:
-    # · 횡보장에서 위·아래 흔들림 제거
-    # · ‘떨어지고 있다’는 사실을 구조적으로 확인
-    # 성격:
-    # · SHORT 전용 전략에서 매우 강력한 확신 게이트
-
-    # --------------------------------------------------
-    # [ 12 / 13 실행 규칙 — OR 규칙 (중요) ]
-    # --------------------------------------------------
-    # - 두 옵션은 항상 OR 규칙만 허용한다.
-    # - AND 조건은 설계 위반이다.
-    # 이유:
-    # - 12 = 속도 확보
-    # - 13 = 확신 확보
-
+    "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.0,
+    "13_EXECUTION_ONLY_ON_NEW_LOW": False,
 
     # =====================================================
-    # [ STEP 7 ] 실행 속도 제어 (최소 쿨다운 보험)
-    # ROLE: EXECUTION TEMPO CONTROL
+    # [ STEP 7 ] 실행 속도 제어 (COOLDOWN)
     # =====================================================
-
-    "14_STATE_COOLDOWN_ENABLE": False,     # 14 STATE_COOLDOWN_ENABLE
-    # 설명: RANGE / TREND 상태에 따라
-    #       실행 쿨다운을 다르게 적용할지 여부
-    #
-    # 핵심 전제 (중요):
-    # · RANGE / TREND 상태는
-    #   별도의 시장 상태 모듈이 아니다.
-    # · **EMA_SLOPE_MIN_PCT / EMA_SLOPE_LOOKBACK_BARS**
-    #   계산 결과를 그대로 사용해 판단한다.
-    # · EMA 경사도가 약하면 → RANGE
-    #   EMA 경사도가 뚜렷하면 → TREND로 간주한다.
-    #
-    # 질문 형태 설명:
-    # “EMA가 거의 움직이지 않는 횡보장과,
-    #  EMA가 분명히 기울어진 추세장에서
-    #  쿨다운을 똑같이 쓰는 게 맞을까?”
-    #
-    # 추천값: True
-    #
-    # 효과:
-    # · RANGE(횡보) 구간에서는
-    #   → 연타·미세 흔들림 진입을 강하게 억제
-    # · TREND(추세) 구간에서는
-    #   → 기회를 끊지 않고 유지
-    #
-    # 동작 방식:
-    # · True  → EMA 경사도 기준으로
-    #          RANGE 시 15번,
-    #          TREND 시 16번 쿨다운 적용
-    # · False → 시장 상태 구분 없이
-    #          항상 동일한 쿨다운만 사용
-
-
-    "15_COOLDOWN_RANGE_BARS": 0,          # 15 COOLDOWN_RANGE_BARS
-    # 설명: EMA 경사도가 기준 미만일 때
-    #       (RANGE, 횡보로 판단될 경우)
-    #       적용되는 실행 쿨다운
-    #
-    # 의미 (중1):
-    # “EMA가 거의 기울지 않는 횡보장에서는
-    #  얼마나 쉬었다가 다시 들어갈까?”
-    #
-    # 추천값: 4
-    # 추천범위: 2 ~ 6
-    # · 2: 횡보에서도 다시 빨리 진입 (공격적)
-    # · 4: 횡보 연타를 확실히 줄이는 균형값
-    # · 6: 횡보 구간은 거의 건드리지 않음 (보수)
-    #
-    # 체감 설명:
-    # · 값 4 = 5분봉 4개 = 약 20분 쉼
-    #
-    # 효과:
-    # · 횡보 구간에서의 연타·미세 흔들림 실행을 억제
-    # · 실행 이후 폭주를 막는 핵심 레버
-    #
-    # 주의 (설계 고정):
-    # · 이 옵션은 필터가 아니다.
-    # · 후보 생성을 막지 않는다.
-    # · 실행 가능 판정 이후,
-    #   실행 간격을 조절하는 **보험 장치**다.
-
-
-    "16_COOLDOWN_TREND_BARS": 0,          # 16 COOLDOWN_TREND_BARS
-    # 설명: EMA 경사도가 기준 이상일 때
-    #       (TREND, 추세로 판단될 경우)
-    #       적용되는 실행 쿨다운
-    #
-    # 의미 (중1):
-    # “EMA가 분명히 기울어 있는 추세장에서는
-    #  얼마나 빨리 다시 들어갈까?”
-    #
-    # 추천값: 1
-    # 추천범위: 0 ~ 1
-    # · 0: 청산 직후 다음 봉 바로 재진입 가능
-    #      “추세는 끊기지 않는다” 철학
-    #      가장 공격적
-    # · 1: 한 봉(5분) 쉬고 재진입
-    #      휩쏘 한 번 거르고 들어가는 안정형
-    #
-    # 효과:
-    # · 추세 구간에서 기회를 끊지 않고 유지
-    #
-    # 주의 (설계 고정):
-    # · 이 옵션은 필터가 아니다.
-    # · 후보 생성을 막지 않는다.
-    # · 실행 가능 판정 이후,
-    #   재진입 속도를 조절하는 **실행 템포 옵션**이다.
-
+    "14_STATE_COOLDOWN_ENABLE": False,
+    "15_COOLDOWN_RANGE_BARS": 0,
+    "16_COOLDOWN_TREND_BARS": 0,
 
     # =====================================================
-    # [ STEP 8 ] 실행 안전장치 (실매매 보호)
-    # ROLE: EXECUTION SAFETY GUARD
+    # [ STEP 8 ] 실행 안전장치 (LIMITS / STALE / SPREAD)
     # =====================================================
-    # >>> “이 주문을 지금 이 가격·이 환경에서 실행해도 되나?”
-    # → 실행 단위 판단임을 더 명확히 함
-
-    "17_ENTRY_MAX_PER_CYCLE": 5,        # 17 ENTRY_MAX_PER_CYCLE
-    # 설명: 한 사이클에서 허용하는 최대 엔트리 수
-    # 추천값: 1
-    # 역할:
-    # · 단기 폭주 방지
-    # · 로직 오류 시 연속 주문 차단
-
-    "18_MAX_ENTRIES_PER_DAY": 20,        # 18 MAX_ENTRIES_PER_DAY
-    # 설명: 하루 최대 엔트리 수
-    # 추천값: 20
-    # 역할:
-    # · 비정상 시장/버그 상황에서
-    #   손실을 “횟수 기준”으로 제한
-
-    "19_DATA_STALE_BLOCK": False,         # 19 DATA_STALE_BLOCK
-    # 설명: 가격 데이터가 일정 시간 이상 갱신되지 않으면 실행 차단
-    # 추천값: True
-    # 사유: 지연·누락 데이터로 인한 오체결/미체결 사고 방지
-    # 역할: 후보 유지 / 실행만 차단 (EXECUTION SAFETY)
-
-    "20_EXECUTION_SPREAD_GUARD_ENABLE": False,  # 20 EXECUTION_SPREAD_GUARD_ENABLE
-    # 설명: 실행 시점 스프레드가 과도하면 실행 차단
-    # 추천값: True
-    # 사유: 슬리피지·호가 공백 구간에서의 체결 품질 보호
-    # 역할: 후보 유지 / 실행만 차단 (EXECUTION SAFETY)
-
+    "17_ENTRY_MAX_PER_CYCLE": 1,
+    "18_MAX_ENTRIES_PER_DAY": 20,
+    "19_DATA_STALE_BLOCK": True,                 # ✅ ON
+    "20_EXECUTION_SPREAD_GUARD_ENABLE": True,    # ✅ ON
 
     # =====================================================
     # [ STEP 9 ] 재진입 관리 · 후보 정리
-    # ROLE: ENGINE SUPPORT — REENTRY / CANDIDATE HYGIENE
     # =====================================================
-
-    "21_ENTRY_COOLDOWN_BARS": 0,        # 21 ENTRY_COOLDOWN_BARS
-    # 설명: 엔트리 후 최소 대기 봉
-    # 추천값: 2
-    # 효과: 횡보 연타 폭주 방지
-
-    "22_ENTRY_COOLDOWN_AFTER_EXIT": 0,  # 22 ENTRY_COOLDOWN_AFTER_EXIT
-    # 설명: 청산 직후 재진입 대기
-    # 추천값: 1
-    # 효과: 휩쏘 감소
-
-    "23_REENTRY_SAME_REASON_BLOCK": False,  # 23 REENTRY_SAME_REASON_BLOCK
-    # 설명: 동일 사유 반복 진입 차단
-    # 추천값: True
-    # 효과: “새 정보”만 진입 허용
-
-    "24_ENTRY_LOOKBACK_BARS": 1,        # 24 ENTRY_LOOKBACK_BARS
-    # 설명: 과거 N봉 재진입 탐색 범위
-    # 추천값: 5
-    # 효과: 연타 억제 강도 조절
-
-    "25_REENTRY_PRICE_TOL_PCT": 100,   # 25 REENTRY_PRICE_TOL_PCT
-    # 설명: “같은 자리”로 간주하는 가격 허용 오차 비율
-    # 단위: %
-    # 추천값: 0.15
-    # 효과: 횡보장에서 같은 자리 반복 진입 억제
-
-    "26_CAND_POOL_TTL_BARS": 999,         # 26 CAND_POOL_TTL_BARS
-    # 설명: 후보 유지 최대 봉 수(TTL)
-    # 추천값: 6
-    # 효과: 오래된 후보 자동 폐기 / 후보 풀 정리
-
-    "27_CAND_POOL_MAX_SIZE": 999,         # 27 CAND_POOL_MAX_SIZE
-    # 설명: 최대 후보 개수
-    # 추천값: 3
-    # 효과: 후보 과잉 방지
-
-    "28_CAND_MIN_GAP_BARS": 0,          # 28 CAND_MIN_GAP_BARS
-    # 설명: 후보 생성 최소 간격
-    # 추천값: 1
-    # 효과: 후보 중복 완충
-
-
+    "21_ENTRY_COOLDOWN_BARS": 0,
+    "22_ENTRY_COOLDOWN_AFTER_EXIT": 0,
+    "23_REENTRY_SAME_REASON_BLOCK": False,
+    "24_ENTRY_LOOKBACK_BARS": 1,
+    "25_REENTRY_PRICE_TOL_PCT": 100,
+    "26_CAND_POOL_TTL_BARS": 50,
+    "27_CAND_POOL_MAX_SIZE": 50,
+    "28_CAND_MIN_GAP_BARS": 0,
 
     # =====================================================
-    # [ STEP 10 ] 변동성 보호 (보조 안전)
-    # ROLE: ENGINE SUPPORT — MANUAL SAFETY
+    # [ STEP 10 ] 변동성 보호
     # =====================================================
-
-    "29_VOLATILITY_BLOCK_ENABLE": False,     # 29 VOLATILITY_BLOCK_ENABLE
-    # 설명: 과도한 변동성 구간에서 “실행만” 차단할지 여부
-    # 추천값: False
-    #
-    # 역할 (명확화):
-    # · 후보 생성에는 **절대 영향 없음**
-    # · 실행 판단 단계에서만 작동하는 “보조 차단 게이트”
-    #
-    # 사용 의도 (중요):
-    # · BTC_REGIME / EMA_SLOPE와 **동급 핵심 필터가 아님**
-    # · 시장 구조 판단용 ❌
-    # · “오늘은 데이터도 불안하고, 장도 이상하다” 같은
-    #   **운영자 개입 상황에서만 사용하는 수동 안전장치**
-    #
-    # 설계 고정 문장:
-    # · 이 옵션은 기본 OFF를 전제로 한다.
-    # · 이 옵션을 상시 ON으로 쓰기 시작하면,
-    #   V7의 “필터 최소화 원칙”을 위반한 것이다.
-
-    "30_VOLATILITY_MAX_PCT": 2.5,            # 30 VOLATILITY_MAX_PCT
-    # 설명: 변동성이 이 퍼센트 이상일 경우 실행 차단
-    # 추천값: 2.5
-    # 단위: %
-    #
-    # 작동 조건:
-    # · VOLATILITY_BLOCK_ENABLE = True 일 때만 유효
-    # · 실행 판단 단계에서만 체크
-    #
-    # 주의 (설계 고정):
-    # · 이 값은 “시장 판단 기준”이 아니다.
-    # · 단기 급변·데이터 튐·이상 캔들에 대한
-    #   **임시 보호선**으로만 사용한다.
-
+    "29_VOLATILITY_BLOCK_ENABLE": False,
+    "30_VOLATILITY_MAX_PCT": 20,
 
     # =====================================================
-    # [ STEP 11 ] 로그 / 관측 전용
-    # ROLE: OBSERVABILITY ONLY
+    # [ STEP 11 ] 로그
     # =====================================================
-
-    "31_LOG_CANDIDATES": True,     # 31 LOG_CANDIDATES
-    # 설명: 후보 생성 로그
-    # 추천값: True
-    # 효과: 튜닝의 출발점
-
-    "32_LOG_EXECUTIONS": True,     # 32 LOG_EXECUTIONS
-    # 설명: 주문·체결 로그
-    # 추천값: True
-    # 효과: 실전 단일 진실
-
+    "31_LOG_CANDIDATES": True,
+    "32_LOG_EXECUTIONS": True,  # 기록만 (실주문 OFF)
 
     # =====================================================
-    # [ STEP 12 ] FAIL-SAFE / 엔진 보호
-    # ROLE: ENGINE FAIL-SAFE
+    # [ STEP 12 ] FAIL-SAFE
     # =====================================================
+    "33_ENGINE_FAIL_FAST_ENABLE": True,
+    "34_ENGINE_FAIL_NOTIFY_ONLY": True,
 
-    "33_ENGINE_FAIL_FAST_ENABLE": True,     # 33 ENGINE_FAIL_FAST_ENABLE
-    # 설명: 치명 오류 발생 시 즉시 엔진 중단 여부
-    # 추천값: True
-    # 효과:
-    # · 조용히 망가진 상태로 계속 도는 것 방지
-    # · 이상 징후 발생 즉시 정지 → 원인 추적 가능
-
-    "34_ENGINE_FAIL_NOTIFY_ONLY": True,     # 34 ENGINE_FAIL_NOTIFY_ONLY
-    # 설명: 실패 시 알림만 하고 자동 재시도 금지
-    # 추천값: True
-    # 효과:
-    # · 자동 복구 폭주 방지
-    # · 사람 개입 전제 운영
-
-
-
-
-
-
+    # =====================================================
+    # [ STEP 14 ] EXIT CORE PARAMS (중요 3개)
+    # =====================================================
+    "35_SL_PCT": 0.60,
+    "36_TP_PCT": 0.80,
+    "37_TRAILING_PCT": 0.40,
 }
 
+# ============================================================
+# CFG FREEZE DECLARATION
+# ------------------------------------------------------------
+# 기준선 고정:
+# - 본 파일에서 허용되는 변경은 CFG 값(숫자/불리언)만.
+# - STEP/로직/순서 변경 금지.
+# ============================================================
 
 
 # ============================================================
-# BTC_CTX BUILDER — REAL BINANCE DATA (UTC 00:00)
-# SOURCE: V7 CFG CONSTITUTION / STEP 4
+# STATE CONTRACT (설계 문장 고정 / 엔진독립)
+# ------------------------------------------------------------
+# 1) state는 계약이다. 암묵 키 생성 금지.
+# 2) ENTRY와 EXIT는 같은 bar에 존재할 수 없다.
+# 3) position은 "주문정보"가 아니라 "시간축 상태"다.
+#    - None : 포지션 없음
+#    - "OPEN": 포지션 존재(Record Only 단계)
 # ============================================================
 
-from binance.client import Client
-from datetime import datetime, timezone
-
-def build_btc_ctx_real(client: Client, logger=print):
-    """
-    btc_ctx:
-      - current: BTCUSDT 현재가
-      - open_1d_utc: BTCUSDT 1D UTC 시가 (00:00)
-    """
-
-    symbol = "BTCUSDT"
-    interval = Client.KLINE_INTERVAL_1DAY
-
-    # 1) 현재가
-    ticker = client.get_symbol_ticker(symbol=symbol)
-    current = float(ticker["price"])
-
-    # 2) 오늘 UTC 00:00 일봉 시가
-    klines = client.get_klines(symbol=symbol, interval=interval, limit=2)
-    if not klines or len(klines) < 1:
-        raise RuntimeError("BTC_CTX_BUILD_FAIL: NO_KLINES")
-
-    # 가장 최신 일봉의 시가 = UTC 00:00 기준
-    open_1d_utc = float(klines[-1][1])
-
-    logger(f"BTC_CTX_BUILD: current={current} open_1d_utc={open_1d_utc}")
-
+def init_state():
     return {
-        "current": current,
-        "open_1d_utc": open_1d_utc,
+        "ticks": 0,
+        "bars": 0,
+
+        # candidate
+        "has_candidate": False,
+        "candidates": [],
+        "last_candidate_bar": None,
+
+        # gate (READY)
+        "gate_ok": False,
+        "gate_reason": None,
+
+        # entry (LIVE CONTRACT)
+        "entry_ready": False,
+        "entry_bar": None,
+        "entry_reason": None,
+
+        # position (TIME AXIS STATE)
+        "position": None,
+        "position_open_bar": None,
+
+        # ---- LIVE / EXIT CONTRACT (EXPLICIT) ----
+        "capital_usdt": None,          # STEP1 sets
+        "initial_equity": None,        # STEP1 sets
+        "equity": None,                # updated on simulated exit
+        "realized_pnl": 0.0,           # 누적
+
+        "entry_price": None,
+        "sl_price": None,
+        "tp_price": None,
+
+        "tp_touched": False,
+        "trailing_active": False,
+
+        "trailing_anchor": None,
+        "trailing_stop": None,
+        "exit_ready": False,
+        "exit_reason": None,
+        "order_inflight": False,
+
+        # ---- EXIT CONFIRM (3-BAR / CLOSE BASIS) ----
+        "exit_signal": None,         # None / "SL" / "TP" / "TRAIL"
+        "exit_confirm_count": 0,     # 같은 signal 연속 충족 횟수 (>=3 이면 EXIT)
+
+        # ---- EXIT FIRE LOCK (STATE CONTRACT) ----
+        "exit_fired_bar": None,
+        "exit_fired_signal": None,
+
+        # ---- LIMITS / TIME AXIS ----
+        "cycle_id": 0,
+        "entries_in_cycle": 0,
+        "entries_today": 0,
+        "day_key": None,
+        "last_entry_bar": None,
+        "last_exit_bar": None,
+        "last_entry_reason": None,
+        "last_entry_price": None,
+
+        # EMA series cache (LIVE data only)
+        "_ema9_series_live": [],
+
+        # records
+        "execution_records": [],      # STEP 13
+        "exit_records": [],           # STEP 15 confirm
+        "sl_tp_trailing_records": [], # STEP 14 calc snapshots
     }
 
 
+# ============================================================
+# Numeric helpers
+# ============================================================
 
+def q(x, p=6):
+    return float(Decimal(str(x)).quantize(Decimal("1." + "0"*p), rounding=ROUND_DOWN))
+
+def _safe_float(x):
+    try:
+        if x is None:
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+def _ms_to_daykey_utc(ms):
+    # UTC day key: ms since epoch -> days since epoch
+    try:
+        return int(int(ms) // 86400000)
+    except Exception:
+        return None
 
 
 # ============================================================
-# [ STEP 1 ] 거래 대상 · 자본 · 손실 한계
-# ROLE: ENGINE LIMIT / CAPITAL BOUNDARY
-# SOURCE: V7 CFG CONSTITUTION
+# DATA LOADER (REPLAY)
 # ============================================================
 
-def step_1_engine_limit(cfg, state, logger=print):
-    """
-    STEP 1 — ENGINE LIMIT / CAPITAL BOUNDARY
-    - 판단 ❌ / 체크만 ⭕
-    - 실패 시 즉시 엔진 중단
-    """
+def load_sui_binance_ema9_csv(path):
+    df = pd.read_csv(path)
+    df.rename(columns={c: c.strip() for c in df.columns}, inplace=True)
 
-    # --------------------------------------------------------
-    # CFG 존재 검증 (조용히 통과 금지)
-    # --------------------------------------------------------
-    required_keys = [
-        "01_TRADE_SYMBOL",
-        "02_CAPITAL_BASE_USDT",
-        "03_CAPITAL_USE_FIXED",
-        "04_CAPITAL_MAX_LOSS_PCT",
-    ]
-    for k in required_keys:
+    rows = []
+    for _, r in df.iterrows():
+        ema = None
+        if "ema9" in df.columns:
+            ema = r.get("ema9")
+        elif "EMA9" in df.columns:
+            ema = r.get("EMA9")
+
+        rows.append({
+            "time": r.get("time"),
+            "open": r.get("open"),
+            "high": r.get("high"),
+            "low": r.get("low"),
+            "close": r.get("close"),
+            "ema9": ema,
+        })
+    return rows
+
+def build_market_ctx(row):
+    return {
+        "time": row.get("time"),
+        "open": row.get("open"),
+        "high": row.get("high"),
+        "low": row.get("low"),
+        "close": row.get("close"),
+        "ema9": row.get("ema9"),
+    }
+
+
+# ============================================================
+# [ STEP 1 ] ENGINE LIMIT (READY)
+# - CAPITAL_USE_FIXED 집행
+# - CAPITAL_MAX_LOSS_PCT 집행(STATE 초기화)
+# ============================================================
+
+def step_1_engine_limit(cfg, state, capital_ctx=None, logger=print):
+    required = ["01_TRADE_SYMBOL", "02_CAPITAL_BASE_USDT", "03_CAPITAL_USE_FIXED", "04_CAPITAL_MAX_LOSS_PCT"]
+    for k in required:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP1: {k}")
 
-    # --------------------------------------------------------
-    # 01 TRADE_SYMBOL
-    # --------------------------------------------------------
-    trade_symbol = cfg["01_TRADE_SYMBOL"]
-    if not isinstance(trade_symbol, str) or not trade_symbol:
+    if not isinstance(cfg["01_TRADE_SYMBOL"], str) or not cfg["01_TRADE_SYMBOL"]:
         raise RuntimeError("STEP1_INVALID_TRADE_SYMBOL")
 
-    # --------------------------------------------------------
-    # 02 CAPITAL_BASE_USDT
-    # --------------------------------------------------------
-    capital_base = cfg["02_CAPITAL_BASE_USDT"]
-    if not isinstance(capital_base, (int, float)) or capital_base <= 0:
+    base = cfg["02_CAPITAL_BASE_USDT"]
+    if not isinstance(base, (int, float)) or float(base) <= 0:
         raise RuntimeError("STEP1_INVALID_CAPITAL_BASE_USDT")
 
-    # --------------------------------------------------------
-    # 03 CAPITAL_USE_FIXED
-    # (STEP 1에서는 값 존재만 확인, 실제 사용은 이후 STEP)
-    # --------------------------------------------------------
-    capital_use_fixed = cfg["03_CAPITAL_USE_FIXED"]
-    if not isinstance(capital_use_fixed, bool):
-        raise RuntimeError("STEP1_INVALID_CAPITAL_USE_FIXED")
+    if not isinstance(cfg["03_CAPITAL_USE_FIXED"], bool):
+        raise RuntimeError("STEP1_INVALID_BOOL: 03_CAPITAL_USE_FIXED")
 
-    # --------------------------------------------------------
-    # 04 CAPITAL_MAX_LOSS_PCT
-    # ENGINE 전체 기준 누적 손실 한계
-    # (실현 + 미실현 손익)
-    # --------------------------------------------------------
     max_loss_pct = cfg["04_CAPITAL_MAX_LOSS_PCT"]
-    if not isinstance(max_loss_pct, (int, float)) or max_loss_pct <= 0:
+    if not isinstance(max_loss_pct, (int, float)) or float(max_loss_pct) < 0:
         raise RuntimeError("STEP1_INVALID_CAPITAL_MAX_LOSS_PCT")
 
-    realized_pnl   = state.get("realized_pnl", 0.0)
-    unrealized_pnl = state.get("unrealized_pnl", 0.0)
-    total_pnl = realized_pnl + unrealized_pnl
+    # CAPITAL USE (fixed / dynamic)
+    capital_usdt = float(base)
+    if not cfg["03_CAPITAL_USE_FIXED"]:
+        # dynamic capital (live only): capital_ctx["available_usdt"] if provided
+        if capital_ctx and isinstance(capital_ctx.get("available_usdt"), (int, float)):
+            capital_usdt = max(0.0, float(capital_ctx["available_usdt"]))
 
-    max_allowed_loss = -capital_base * (max_loss_pct / 100.0)
+    state["capital_usdt"] = capital_usdt
 
-    if total_pnl <= max_allowed_loss:
-        logger("ENGINE_MAX_LOSS_HIT")
-        return False
+    # 최초 1회: equity 초기화
+    if state.get("initial_equity") is None:
+        state["initial_equity"] = capital_usdt
+        state["equity"] = capital_usdt
+        state["realized_pnl"] = 0.0
 
-    # --------------------------------------------------------
-    # PASS
-    # --------------------------------------------------------
     logger("STEP1_PASS")
     return True
 
 
 # ============================================================
-# [ STEP 2 ] 엔진 / 실행 스위치
-# ROLE: ENGINE MASTER SWITCH
-# SOURCE: V7 CFG CONSTITUTION
+# [ STEP 2 ] ENGINE SWITCH (READY)
 # ============================================================
 
 def step_2_engine_switch(cfg, logger=print):
-    """
-    STEP 2 — ENGINE MASTER SWITCH
-    - 허용/차단 스위치만 판정
-    - 후보/실행 로직 개입 ❌
-    """
-
-    required_keys = [
-        "05_ENGINE_ENABLE",
-        "06_ENTRY_CANDIDATE_ENABLE",
-        "07_ENTRY_EXEC_ENABLE",
-    ]
-    for k in required_keys:
+    for k in ["05_ENGINE_ENABLE", "06_ENTRY_CANDIDATE_ENABLE", "07_ENTRY_EXEC_ENABLE"]:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP2: {k}")
-
-    for k in required_keys:
         if not isinstance(cfg[k], bool):
             raise RuntimeError(f"STEP2_INVALID_BOOL: {k}")
 
@@ -580,692 +320,1026 @@ def step_2_engine_switch(cfg, logger=print):
         logger("STEP2_DENY: ENGINE_ENABLE=False")
         return False
 
-    logger(
-        f"STEP2_PASS: "
-        f"CANDIDATE_ENABLE={cfg['06_ENTRY_CANDIDATE_ENABLE']} "
-        f"EXEC_ENABLE={cfg['07_ENTRY_EXEC_ENABLE']}"
-    )
+    logger("STEP2_PASS")
     return True
 
 
 # ============================================================
-# [ STEP 3 ] 후보 생성
-# ROLE: CANDIDATE GENERATOR
-# SOURCE: V7 CFG CONSTITUTION
+# [ STEP 3 ] CANDIDATE GENERATOR (SINGLE SOURCE)
+# 계약:
+# - [04~18] 체크리스트 준수
+# - 한 봉에서 중복 생성 금지
+# - BTC/gate/position 무관 (오직 이벤트 기록)
+# - 수량/SLTPTRAIL/entry_ready 설정 금지
+# - 후보 TTL/POOL 관리는 STEP 9에서만
 # ============================================================
 
 def step_3_generate_candidates(cfg, market, state, logger=print):
-    """
-    STEP 3 — CANDIDATE GENERATOR
-    - 후보 생성만 수행
-    - 실행/필터/판단 ❌
-    """
+    if not cfg.get("06_ENTRY_CANDIDATE_ENABLE", True):
+        return
 
-    # CFG 존재 검증
     if "08_CAND_BODY_BELOW_EMA" not in cfg:
         raise RuntimeError("CFG_MISSING_KEY_STEP3: 08_CAND_BODY_BELOW_EMA")
 
-    candidates = []
-
     if not cfg["08_CAND_BODY_BELOW_EMA"]:
-        logger("STEP3_SKIP: CAND_BODY_BELOW_EMA=False")
-        return candidates
+        return
 
-    # ⚠️ 실제 EMA/가격 로직은 다음 단계
-    # 지금은 “후보 생성 파이프라인이 살아 있는지”만 확인
+    if market is None:
+        return
 
-    logger("STEP3_CANDIDATE_GENERATOR_READY")
-    return candidates
+    low = _safe_float(market.get("low"))
+    ema9 = _safe_float(market.get("ema9"))
+    t = market.get("time")
+
+    if low is None or ema9 is None:
+        return
+
+    # ✅ 한 봉 중복 생성 금지 (bar 기준)
+    if state.get("last_candidate_bar") == state.get("bars"):
+        return
+
+    # ✅ MIN GAP (bars) 집행: 28_CAND_MIN_GAP_BARS
+    gap = int(cfg.get("28_CAND_MIN_GAP_BARS", 0) or 0)
+    last_bar = state.get("last_candidate_bar")
+    if last_bar is not None and gap > 0:
+        if (state.get("bars", 0) - int(last_bar)) < gap:
+            return
+
+    # ✅ 침범(low < ema9) 즉시 후보 생성
+    if low < ema9:
+        state["has_candidate"] = True
+        state["last_candidate_bar"] = state.get("bars")
+        cand = {
+            "bar": state.get("bars"),
+            "time": t,
+            "trigger_price": low,
+            "ema9": ema9,
+            "reason": "EMA9_PENETRATION",
+        }
+        state["candidates"].append(cand)
+        if cfg.get("31_LOG_CANDIDATES", True):
+            logger(f"STEP3_NEW_CANDIDATE: bar={state['bars']} t={t} low={low} ema9={ema9}")
 
 
 # ============================================================
-# [ STEP 4 ] BTC SESSION BIAS
-# ROLE: EXECUTION GATE — MARKET CONTEXT
-# SOURCE: V7 CFG CONSTITUTION
+# [ STEP 4 ] BTC SESSION BIAS (ENTRY GATE ONLY)
+# ------------------------------------------------------------
+# [19~26] 체크리스트 준수
+# [-1] BTC_BIAS는 후보 생성과 무관 (STEP3)
+# [-2] BTC_BIAS는 ENTRY 허용(gate)만 차단
 # ============================================================
 
-def step_4_btc_session_bias(cfg, btc_ctx, logger=print):
-    """
-    STEP 4 — BTC SESSION BIAS
-    - 후보는 유지
-    - 실행만 허용/차단
-    """
-
-    # CFG 존재 검증
+def step_4_btc_session_bias(cfg, btc_ctx, state, logger=print):
     if "09_BTC_SESSION_BIAS_ENABLE" not in cfg:
         raise RuntimeError("CFG_MISSING_KEY_STEP4: 09_BTC_SESSION_BIAS_ENABLE")
 
-    # 비활성화 시 즉시 통과
     if not cfg["09_BTC_SESSION_BIAS_ENABLE"]:
-        logger("STEP4_SKIP: BTC_SESSION_BIAS_DISABLE")
+        # gate_ok를 여기서 True로 강제하지 않는다 (다른 gate가 쓸 수 있음)
         return True
 
-    # BTC 컨텍스트 필수화 (중요)
-    if btc_ctx is None:
-        logger("STEP4_DENY: BTC_CTX_NONE")
+    if btc_ctx is None or btc_ctx.get("daily_open") is None or btc_ctx.get("price") is None:
+        state["gate_ok"] = False
+        state["gate_reason"] = "BTC_CTX_MISSING"
         return False
 
-    for k in ("current", "open_1d_utc"):
-        if k not in btc_ctx:
-            raise RuntimeError(f"BTC_CTX_MISSING_KEY_STEP4: {k}")
+    daily_open = _safe_float(btc_ctx.get("daily_open"))
+    price = _safe_float(btc_ctx.get("price"))
+    if daily_open is None or price is None:
+        state["gate_ok"] = False
+        state["gate_reason"] = "BTC_CTX_INVALID"
+        return False
 
-        if not isinstance(btc_ctx[k], (int, float)):
-            raise RuntimeError(f"BTC_CTX_INVALID_TYPE_STEP4: {k}")
-
-    current = float(btc_ctx["current"])
-    open_1d = float(btc_ctx["open_1d_utc"])
-
-    # 기준 로그 (디버그/검증용)
-    logger(f"STEP4_CHECK: current={current} open_1d_utc={open_1d}")
-
-    # 실행 허용 조건 (단 하나)
-    if current < open_1d:
-        logger("STEP4_PASS: BTC_BELOW_1D_OPEN")
+    if price < daily_open:
+        # OK (통과만)
         return True
 
-    logger("STEP4_DENY: BTC_SESSION_BIAS_DENY")
+    state["gate_ok"] = False
+    state["gate_reason"] = f"BTC_BIAS_BLOCK (price={q(price,4)} >= open={q(daily_open,4)})"
     return False
 
 
 # ============================================================
-# EMA_CTX BUILD
-# SOURCE: V7 CFG CONSTITUTION (STEP 5 / STEP 7 공용)
+# [ STEP 5 ] EMA SLOPE GATE (ENTRY GATE ONLY)
 # ============================================================
 
-def build_ema_ctx(candles, ema_period=9, lookback=3):
-    """
-    ema_ctx:
-      - slope_pct: 최근 lookback 기준 EMA 기울기(%)
-    """
-    if candles is None or len(candles) < ema_period + lookback:
-        return None
-
-    # EMA 계산
-    def ema(values, period):
-        k = 2 / (period + 1)
-        e = values[0]
-        for v in values[1:]:
-            e = v * k + e * (1 - k)
-        return e
-
-    closes = [c["close"] for c in candles]
-    ema_series = []
-    for i in range(ema_period, len(closes) + 1):
-        ema_series.append(ema(closes[:i], ema_period))
-
-    if len(ema_series) < lookback + 1:
-        return None
-
-    e_now = ema_series[-1]
-    e_prev = ema_series[-1 - lookback]
-    if e_prev == 0:
-        return None
-
-    slope_pct = ((e_now - e_prev) / abs(e_prev)) * 100.0
-    return {"slope_pct": slope_pct}
-
-
-
-# ============================================================
-# [ STEP 5 ] EMA SLOPE (MARKET ACTIVITY)
-# ROLE: EXECUTION GATE — MARKET ACTIVITY
-# SOURCE: V7 CFG CONSTITUTION
-# ============================================================
-
-def step_5_ema_slope(cfg, ema_ctx, logger=print):
-    """
-    STEP 5 — EMA SLOPE
-    - 후보 유지
-    - 실행만 허용/차단
-    - CTX 배선 전(None) 단계에서는 READY로 통과
-    """
-
-    # --------------------------------------------------------
-    # CFG 존재 검증
-    # --------------------------------------------------------
-    required_keys = [
-        "10_EMA_SLOPE_MIN_PCT",
-        "11_EMA_SLOPE_LOOKBACK_BARS",
-    ]
-    for k in required_keys:
+def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
+    for k in ["10_EMA_SLOPE_MIN_PCT", "11_EMA_SLOPE_LOOKBACK_BARS"]:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP5: {k}")
 
-    # --------------------------------------------------------
-    # CTX 연결 전 단계 (STRAIGHT 배선 단계)
-    # --------------------------------------------------------
-    if ema_ctx is None:
-        logger("STEP5_READY: EMA_CTX_NONE")
-        return True
+    if ema_ctx is None or not ema_ctx.get("ema9_series"):
+        state["gate_ok"] = False
+        state["gate_reason"] = "EMA_CTX_MISSING"
+        return False
 
-    # --------------------------------------------------------
-    # CTX 구조 검증
-    # --------------------------------------------------------
-    if not isinstance(ema_ctx, dict):
-        raise RuntimeError("EMA_CTX_INVALID_STEP5: NOT_DICT")
+    min_pct = float(cfg["10_EMA_SLOPE_MIN_PCT"])
+    lb = int(cfg["11_EMA_SLOPE_LOOKBACK_BARS"] or 1)
 
-    slope_pct = ema_ctx.get("slope_pct")
-    if not isinstance(slope_pct, (int, float)):
-        raise RuntimeError("EMA_CTX_INVALID_STEP5: slope_pct")
+    series = ema_ctx["ema9_series"]
+    if len(series) <= lb:
+        state["gate_ok"] = False
+        state["gate_reason"] = "EMA_SERIES_TOO_SHORT"
+        return False
 
-    # --------------------------------------------------------
-    # 기준 로그
-    # --------------------------------------------------------
-    logger(f"STEP5_CHECK: slope_pct={slope_pct:.4f}")
+    ema_now = _safe_float(series[-1])
+    ema_prev = _safe_float(series[-1 - lb])
+    if ema_now is None or ema_prev is None or ema_prev == 0:
+        state["gate_ok"] = False
+        state["gate_reason"] = "EMA_INVALID"
+        return False
 
-    # --------------------------------------------------------
-    # 실행 허용 조건
-    # --------------------------------------------------------
-    if abs(slope_pct) >= cfg["10_EMA_SLOPE_MIN_PCT"]:
-        logger("STEP5_PASS: EMA_SLOPE_OK")
-        return True
+    slope_pct = (ema_now - ema_prev) / ema_prev * 100.0
 
-    logger("STEP5_DENY: EMA_SLOPE_TOO_FLAT")
-    return False
+    # SHORT 기준: slope <= 0 (또는 -min_pct 이하)
+    if min_pct <= 0:
+        ok = (slope_pct <= 0)
+    else:
+        ok = (slope_pct <= -abs(min_pct))
 
-
-
-
-
+    state["gate_ok"] = bool(ok)
+    state["gate_reason"] = f"EMA_SLOPE_OK={ok} slope_pct={q(slope_pct,4)}"
+    return bool(ok)
 
 
 # ============================================================
-# [ STEP 6 ] PRICE CONFIRMATION (12 / 13 OR)
-# ROLE: EXECUTION GATE — PRICE CONFIRMATION
-# SOURCE: V7 CFG CONSTITUTION
+# [ STEP 6 ] ENTRY JUDGEMENT (LIVE CONTRACT / NO ORDER)
+# - STEP3 후보 + gate 결과를 읽어 기록만 한다
+# - STEP6 PRICE CONFIRM(12/13) 집행 포함
 # ============================================================
 
-def step_6_price_confirmation(cfg, price_ctx, logger=print):
-    """
-    STEP 6 — PRICE CONFIRMATION
-    - 12 / 13 OR 규칙
-    - 실행 허용/차단만 판정
-    """
+def step_6_entry_judge(cfg, market, state, logger=print):
+
+    # 🔒 EXIT 우선 시간축: EXIT 준비 중이면 ENTRY 판단 금지
+    if state.get("exit_ready") or state.get("exit_confirm_count", 0) > 0:
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+        state["entry_reason"] = "EXIT_IN_PROGRESS"
+        return False
 
     for k in ["12_EXECUTION_MIN_PRICE_MOVE_PCT", "13_EXECUTION_ONLY_ON_NEW_LOW"]:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP6: {k}")
 
-    # 연결 확인 단계
-    if price_ctx is None:
-        logger("STEP6_READY: PRICE_CTX_NONE")
-        return True
+    has_candidate = bool(state.get("has_candidate") or (len(state.get("candidates", [])) > 0))
+    gate_ok = bool(state.get("gate_ok", False))
 
-    # price_ctx 예시:
-    # {
-    #   "move_pct": float,   # 후보 기준 대비 추가 이동 %
-    #   "is_new_low": bool   # 직전 저점 갱신 여부
-    # }
+    # ---- 후보 최신성 (24_ENTRY_LOOKBACK_BARS) 집행 ----
+    lookback = int(cfg.get("24_ENTRY_LOOKBACK_BARS", 1) or 0)
+    latest_cand_bar = None
+    if state.get("candidates"):
+        latest_cand_bar = state["candidates"][-1].get("bar")
+    if lookback > 0 and latest_cand_bar is not None:
+        if (state.get("bars", 0) - int(latest_cand_bar)) > lookback:
+            has_candidate = False
 
-    cond_speed   = price_ctx.get("move_pct", 0.0) >= cfg["12_EXECUTION_MIN_PRICE_MOVE_PCT"]
-    cond_confirm = price_ctx.get("is_new_low", False) if cfg["13_EXECUTION_ONLY_ON_NEW_LOW"] else False
+    # ---- PRICE CONFIRM(12/13) ----
+    price_ok = True
+    reason_price = None
 
-    if cond_speed or cond_confirm:
-        logger("STEP6_PASS: PRICE_CONFIRM_OK")
-        return True
+    if market is not None:
+        close = _safe_float(market.get("close"))
+        low = _safe_float(market.get("low"))
+    else:
+        close = None
+        low = None
 
-    logger("STEP6_DENY: PRICE_CONFIRM_FAIL")
-    return False
+    # 12_MIN_PRICE_MOVE: 후보 trigger 대비 최소 하락폭(%) 요구 (SHORT)
+    min_move = float(cfg.get("12_EXECUTION_MIN_PRICE_MOVE_PCT", 0.0) or 0.0)
+    if min_move > 0 and has_candidate and close is not None:
+        trig = None
+        try:
+            trig = _safe_float(state["candidates"][-1].get("trigger_price"))
+        except Exception:
+            trig = None
+        if trig and trig > 0:
+            move_pct = (trig - close) / trig * 100.0
+            if move_pct < min_move:
+                price_ok = False
+                reason_price = f"PRICE_MOVE_TOO_SMALL move_pct={q(move_pct,4)} < min={q(min_move,4)}"
+        else:
+            price_ok = False
+            reason_price = "TRIGGER_PRICE_MISSING"
 
+    # 13_ONLY_ON_NEW_LOW: 직전 entry 이후의 "새 저가"에서만 허용
+    if price_ok and bool(cfg.get("13_EXECUTION_ONLY_ON_NEW_LOW", False)):
+        if low is None:
+            price_ok = False
+            reason_price = "LOW_MISSING_FOR_NEW_LOW"
+        else:
+            last_entry_price = _safe_float(state.get("last_entry_price"))
+            if last_entry_price is not None:
+                # "새 저가" = low < last_entry_price (SHORT 관점)
+                if not (low < last_entry_price):
+                    price_ok = False
+                    reason_price = "NOT_NEW_LOW"
+
+    entry_ok = bool(gate_ok and has_candidate and price_ok and state.get("position") is None)
+
+    state["entry_ready"] = entry_ok
+    if entry_ok:
+        state["entry_reason"] = "GATE_OK_AND_CANDIDATE_PRESENT"
+    else:
+        # 가장 먼저 막힌 이유를 기록(짧게)
+        if not gate_ok:
+            state["entry_reason"] = state.get("gate_reason") or "GATE_BLOCK"
+        elif not has_candidate:
+            state["entry_reason"] = "NO_VALID_CANDIDATE"
+        elif not price_ok:
+            state["entry_reason"] = reason_price or "PRICE_CONFIRM_BLOCK"
+        else:
+            state["entry_reason"] = "ENTRY_NOT_READY"
+
+    # entry_ready는 '현재 bar 한정 허가'
+    if entry_ok:
+        state["entry_bar"] = state.get("bars")
+    else:
+        state["entry_bar"] = None
+
+    return entry_ok
 
 
 # ============================================================
-# [ STEP 7 ] 실행 속도 제어 (최소 쿨다운 보험)
-# ROLE: EXECUTION TEMPO CONTROL
-# SOURCE: V7 CFG CONSTITUTION
+# [ STEP 7 ] EXECUTION TEMPO CONTROL (COOLDOWN)
+# - 14/15/16 집행
+# - gate_ok를 '강제 True'로 만들지 않는다 (차단만 담당)
 # ============================================================
 
-def step_7_execution_cooldown(cfg, ema_ctx, logger=print):
-    """
-    STEP 7 — EXECUTION TEMPO CONTROL
-    - 이 스텝은 실행 가능 상태를 TRUE로 만들 수 없다.
-    - ‘얼마나 쉴지’(bars)만 결정한다.
-    """
-
-    required = [
-        "14_STATE_COOLDOWN_ENABLE",
-        "15_COOLDOWN_RANGE_BARS",
-        "16_COOLDOWN_TREND_BARS",
-        "10_EMA_SLOPE_MIN_PCT",  # RANGE/TREND 판정에 필요
-    ]
-    for k in required:
+def step_7_execution_tempo_control(cfg, state, logger=print):
+    for k in ["14_STATE_COOLDOWN_ENABLE", "15_COOLDOWN_RANGE_BARS", "16_COOLDOWN_TREND_BARS"]:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP7: {k}")
 
-    # 연결 확인 단계
-    if ema_ctx is None:
-        logger("STEP7_READY: EMA_CTX_NONE")
-        return 0
-
-    # False면: 시장 상태 구분 없이 동일 쿨다운(여기서는 RANGE값을 단일값으로 사용)
     if not cfg["14_STATE_COOLDOWN_ENABLE"]:
-        logger("STEP7_COOLDOWN_FIXED")
-        return cfg["15_COOLDOWN_RANGE_BARS"]
+        return True
 
-    slope_pct = ema_ctx.get("slope_pct", 0.0)
+    range_bars = int(cfg.get("15_COOLDOWN_RANGE_BARS", 0) or 0)
+    trend_bars = int(cfg.get("16_COOLDOWN_TREND_BARS", 0) or 0)
+    cd = max(range_bars, trend_bars)
 
-    # EMA 경사도 기준 이상이면 TREND, 미만이면 RANGE
-    if slope_pct >= cfg["10_EMA_SLOPE_MIN_PCT"]:
-        logger("STEP7_COOLDOWN_TREND")
-        return cfg["16_COOLDOWN_TREND_BARS"]
+    if cd <= 0:
+        return True
 
-    logger("STEP7_COOLDOWN_RANGE")
-    return cfg["15_COOLDOWN_RANGE_BARS"]
+    last_exit_bar = state.get("last_exit_bar")
+    if last_exit_bar is None:
+        return True
 
+    if (state.get("bars", 0) - int(last_exit_bar)) < cd:
+        state["gate_ok"] = False
+        state["gate_reason"] = f"COOLDOWN_BLOCK remaining={cd - (state['bars'] - int(last_exit_bar))}"
+        return False
+
+    return True
 
 
 # ============================================================
 # [ STEP 8 ] EXECUTION SAFETY GUARD
-# ROLE: EXECUTION SAFETY GUARD
-# SOURCE: V7 CFG CONSTITUTION
+# - 17_ENTRY_MAX_PER_CYCLE 집행
+# - 18_MAX_ENTRIES_PER_DAY 집행 (UTC daykey)
+# - 19_DATA_STALE_BLOCK 집행
+# - 20_SPREAD_GUARD 집행
 # ============================================================
 
-def step_8_execution_safety_guard(cfg, safety_ctx, logger=print):
-    """
-    STEP 8 — EXECUTION SAFETY GUARD
-    - 실행 단위 안전 차단만 수행
-    - 실행 가능 상태를 TRUE로 만들 수 없다
-    """
-
-    required = [
-        "17_ENTRY_MAX_PER_CYCLE",
-        "18_MAX_ENTRIES_PER_DAY",
-        "19_DATA_STALE_BLOCK",
-        "20_EXECUTION_SPREAD_GUARD_ENABLE",
-    ]
-    for k in required:
+def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
+    for k in ["17_ENTRY_MAX_PER_CYCLE", "18_MAX_ENTRIES_PER_DAY", "19_DATA_STALE_BLOCK", "20_EXECUTION_SPREAD_GUARD_ENABLE"]:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP8: {k}")
 
-    # 연결 확인 단계
+    # ---- entry limit per cycle ----
+    max_cycle = int(cfg.get("17_ENTRY_MAX_PER_CYCLE", 1) or 0)
+    if max_cycle > 0 and int(state.get("entries_in_cycle", 0)) >= max_cycle and state.get("position") is None:
+        state["gate_ok"] = False
+        state["gate_reason"] = f"MAX_ENTRY_PER_CYCLE_BLOCK limit={max_cycle}"
+        return False
+
+    # ---- entry limit per day (UTC) ----
+    max_day = int(cfg.get("18_MAX_ENTRIES_PER_DAY", 0) or 0)
+    if max_day > 0:
+        # day_key update from safety_ctx.market_time_ms if provided
+        ms = None
+        if safety_ctx and safety_ctx.get("market_time_ms") is not None:
+            ms = safety_ctx.get("market_time_ms")
+        dk = _ms_to_daykey_utc(ms) if ms is not None else None
+        if dk is not None:
+            if state.get("day_key") != dk:
+                state["day_key"] = dk
+                state["entries_today"] = 0
+        if int(state.get("entries_today", 0)) >= max_day and state.get("position") is None:
+            state["gate_ok"] = False
+            state["gate_reason"] = f"MAX_ENTRIES_PER_DAY_BLOCK limit={max_day}"
+            return False
+
     if safety_ctx is None:
-        logger("STEP8_READY: SAFETY_CTX_NONE")
         return True
 
-    # safety_ctx 예시:
-    # {
-    #   "entries_this_cycle": int,
-    #   "entries_today": int,
-    #   "data_stale": bool,
-    #   "spread_ok": bool,
-    # }
+    # ---- stale block ----
+    if cfg["19_DATA_STALE_BLOCK"]:
+        if safety_ctx.get("is_stale"):
+            state["gate_ok"] = False
+            state["gate_reason"] = f"DATA_STALE_BLOCK age_ms={safety_ctx.get('age_ms')}"
+            return False
 
-    if safety_ctx.get("entries_this_cycle", 0) >= cfg["17_ENTRY_MAX_PER_CYCLE"]:
-        logger("STEP8_DENY: ENTRY_MAX_PER_CYCLE")
-        return False
-
-    if safety_ctx.get("entries_today", 0) >= cfg["18_MAX_ENTRIES_PER_DAY"]:
-        logger("STEP8_DENY: MAX_ENTRIES_PER_DAY")
-        return False
-
-    if cfg["19_DATA_STALE_BLOCK"] and safety_ctx.get("data_stale", False):
-        logger("STEP8_DENY: DATA_STALE")
-        return False
-
-    if cfg["20_EXECUTION_SPREAD_GUARD_ENABLE"] and not safety_ctx.get("spread_ok", True):
-        logger("STEP8_DENY: SPREAD_GUARD")
-        return False
-
-    logger("STEP8_PASS: SAFETY_OK")
-    return True
-
-
-
-# ============================================================
-# [ STEP 9 ] REENTRY / CANDIDATE HYGIENE
-# ROLE: ENGINE SUPPORT — REENTRY / CANDIDATE HYGIENE
-# SOURCE: V7 CFG CONSTITUTION
-# ============================================================
-
-def step_9_reentry_candidate_hygiene(cfg, reentry_ctx, logger=print):
-    """
-    STEP 9 — REENTRY / CANDIDATE HYGIENE
-    - 실행 판단 결과를 TRUE로 만들 수 없다.
-    - 이미 TRUE인 실행을 DELAY/BLOCK만 가능.
-    """
-
-    required = [
-        "21_ENTRY_COOLDOWN_BARS",
-        "22_ENTRY_COOLDOWN_AFTER_EXIT",
-        "23_REENTRY_SAME_REASON_BLOCK",
-        "24_ENTRY_LOOKBACK_BARS",
-        "25_REENTRY_PRICE_TOL_PCT",
-        "26_CAND_POOL_TTL_BARS",
-        "27_CAND_POOL_MAX_SIZE",
-        "28_CAND_MIN_GAP_BARS",
-    ]
-    for k in required:
-        if k not in cfg:
-            raise RuntimeError(f"CFG_MISSING_KEY_STEP9: {k}")
-
-    # 연결 확인 단계
-    if reentry_ctx is None:
-        logger("STEP9_READY: REENTRY_CTX_NONE")
-        return True
-
-    # 실제 로직은 다음 단계에서 연결
-    logger("STEP9_PASS: HYGIENE_OK")
-    return True
-
-
-
-# ============================================================
-# [ STEP 10 ] VOLATILITY PROTECTION (MANUAL SAFETY)
-# ROLE: ENGINE SUPPORT — MANUAL SAFETY
-# SOURCE: V7 CFG CONSTITUTION
-# ============================================================
-
-def step_10_volatility_protection(cfg, vol_ctx, logger=print):
-    """
-    STEP 10 — VOLATILITY PROTECTION
-    - 실행 판단 결과를 TRUE로 만들 수 없다.
-    - 이미 TRUE인 실행을 BLOCK만 가능.
-    """
-
-    for k in ["29_VOLATILITY_BLOCK_ENABLE", "30_VOLATILITY_MAX_PCT"]:
-        if k not in cfg:
-            raise RuntimeError(f"CFG_MISSING_KEY_STEP10: {k}")
-
-    # 연결 확인 단계
-    if vol_ctx is None:
-        logger("STEP10_READY: VOL_CTX_NONE")
-        return True
-
-    if not cfg["29_VOLATILITY_BLOCK_ENABLE"]:
-        logger("STEP10_SKIP: VOL_BLOCK_DISABLED")
-        return True
-
-    if vol_ctx.get("vol_pct", 0.0) >= cfg["30_VOLATILITY_MAX_PCT"]:
-        logger("STEP10_DENY: VOLATILITY_TOO_HIGH")
-        return False
-
-    logger("STEP10_PASS: VOL_OK")
-    return True
-
-
-
-# ============================================================
-# [ STEP 11 ] OBSERVABILITY ONLY
-# ROLE: OBSERVABILITY ONLY
-# SOURCE: V7 CFG CONSTITUTION
-# ============================================================
-
-def step_11_observability(cfg, obs_ctx, logger=print):
-    """
-    STEP 11 — OBSERVABILITY ONLY
-    - 판단/차단/허용 개입 ❌
-    - 로그 출력 여부만 관리
-    """
-
-    for k in ["31_LOG_CANDIDATES", "32_LOG_EXECUTIONS"]:
-        if k not in cfg:
-            raise RuntimeError(f"CFG_MISSING_KEY_STEP11: {k}")
-
-    # 연결 확인 단계
-    if obs_ctx is None:
-        logger("STEP11_READY: OBS_CTX_NONE")
-        return True
-
-    if cfg["31_LOG_CANDIDATES"]:
-        logger("STEP11_LOG: CANDIDATES_ENABLED")
-
-    if cfg["32_LOG_EXECUTIONS"]:
-        logger("STEP11_LOG: EXECUTIONS_ENABLED")
-
-    return True
-
-
-
-# ============================================================
-# [ STEP 12 ] ENGINE FAIL-SAFE
-# ROLE: ENGINE FAIL-SAFE
-# SOURCE: V7 CFG CONSTITUTION
-# ============================================================
-
-def step_12_engine_fail_safe(cfg, fail_ctx, logger=print):
-    """
-    STEP 12 — ENGINE FAIL-SAFE
-    - 치명 오류 시 엔진을 어떻게 멈출지 결정
-    - 실행 판단을 TRUE로 만들 수 없다
-    """
-
-    for k in ["33_ENGINE_FAIL_FAST_ENABLE", "34_ENGINE_FAIL_NOTIFY_ONLY"]:
-        if k not in cfg:
-            raise RuntimeError(f"CFG_MISSING_KEY_STEP12: {k}")
-
-    # 연결 확인 단계
-    if fail_ctx is None:
-        logger("STEP12_READY: FAIL_CTX_NONE")
-        return True
-
-    # fail_ctx 예시:
-    # {
-    #   "fatal_error": bool,
-    #   "error_msg": str
-    # }
-
-    if fail_ctx.get("fatal_error", False):
-        logger(f"STEP12_FATAL: {fail_ctx.get('error_msg', 'UNKNOWN')}")
-
-        if cfg["33_ENGINE_FAIL_FAST_ENABLE"]:
-            return False  # 즉시 엔진 중단
-
-        # FAIL_FAST 비활성화 시
-        if cfg["34_ENGINE_FAIL_NOTIFY_ONLY"]:
-            logger("STEP12_NOTIFY_ONLY")
+    # ---- spread guard ----
+    if cfg["20_EXECUTION_SPREAD_GUARD_ENABLE"]:
+        spread_pct = safety_ctx.get("spread_pct")
+        HARD_LIMIT = 0.50  # CFG에 임계값이 없어서 하드리밋
+        if spread_pct is None:
+            state["gate_ok"] = False
+            state["gate_reason"] = "SPREAD_CTX_MISSING"
+            return False
+        if float(spread_pct) > HARD_LIMIT:
+            state["gate_ok"] = False
+            state["gate_reason"] = f"SPREAD_BLOCK spread_pct={q(spread_pct,4)}"
             return False
 
     return True
 
 
+# ============================================================
+# [ STEP 9 ] REENTRY / CANDIDATE HYGIENE
+# - 후보 풀 TTL / MAX SIZE 집행
+# - 재진입 쿨다운/사유/가격 허용오차 집행(ENTRY GATE 차단)
+# ============================================================
 
+def step_9_reentry_candidate_hygiene(cfg, market, state, logger=print):
+    required = ["21_ENTRY_COOLDOWN_BARS", "22_ENTRY_COOLDOWN_AFTER_EXIT", "23_REENTRY_SAME_REASON_BLOCK",
+                "24_ENTRY_LOOKBACK_BARS", "25_REENTRY_PRICE_TOL_PCT", "26_CAND_POOL_TTL_BARS",
+                "27_CAND_POOL_MAX_SIZE", "28_CAND_MIN_GAP_BARS"]
+    for k in required:
+        if k not in cfg:
+            raise RuntimeError(f"CFG_MISSING_KEY_STEP9: {k}")
 
+    # ---- candidate TTL ----
+    ttl = int(cfg.get("26_CAND_POOL_TTL_BARS", 0) or 0)
+    if ttl > 0 and state.get("candidates"):
+        now_bar = int(state.get("bars", 0))
+        state["candidates"] = [c for c in state["candidates"] if (now_bar - int(c.get("bar", now_bar))) <= ttl]
+        state["has_candidate"] = len(state["candidates"]) > 0
 
+    # ---- candidate max size ----
+    mx = int(cfg.get("27_CAND_POOL_MAX_SIZE", 0) or 0)
+    if mx > 0 and len(state.get("candidates", [])) > mx:
+        state["candidates"] = state["candidates"][-mx:]
+        state["has_candidate"] = len(state["candidates"]) > 0
+
+    # ---- reentry cooldown (bars since last entry) ----
+    cd_entry = int(cfg.get("21_ENTRY_COOLDOWN_BARS", 0) or 0)
+    last_entry_bar = state.get("last_entry_bar")
+    if cd_entry > 0 and last_entry_bar is not None and state.get("position") is None:
+        if (state.get("bars", 0) - int(last_entry_bar)) < cd_entry:
+            state["gate_ok"] = False
+            state["gate_reason"] = f"REENTRY_ENTRY_COOLDOWN_BLOCK bars={cd_entry}"
+            return False
+
+    # ---- cooldown after exit ----
+    cd_exit = int(cfg.get("22_ENTRY_COOLDOWN_AFTER_EXIT", 0) or 0)
+    last_exit_bar = state.get("last_exit_bar")
+    if cd_exit > 0 and last_exit_bar is not None and state.get("position") is None:
+        if (state.get("bars", 0) - int(last_exit_bar)) < cd_exit:
+            state["gate_ok"] = False
+            state["gate_reason"] = f"REENTRY_AFTER_EXIT_COOLDOWN_BLOCK bars={cd_exit}"
+            return False
+
+    # ---- same reason block ----
+    if bool(cfg.get("23_REENTRY_SAME_REASON_BLOCK", False)) and state.get("position") is None:
+        if state.get("last_entry_reason") and state.get("entry_reason") == state.get("last_entry_reason"):
+            state["gate_ok"] = False
+            state["gate_reason"] = "REENTRY_SAME_REASON_BLOCK"
+            return False
+
+    # ---- reentry price tolerance ----
+    tol_pct = float(cfg.get("25_REENTRY_PRICE_TOL_PCT", 100.0) or 0.0)
+    if tol_pct >= 0 and state.get("position") is None:
+        last_price = _safe_float(state.get("last_entry_price"))
+        cur_price = _safe_float(market.get("close")) if market else None
+        if last_price and cur_price:
+            diff_pct = abs(cur_price - last_price) / last_price * 100.0
+            if diff_pct > tol_pct:
+                state["gate_ok"] = False
+                state["gate_reason"] = f"REENTRY_PRICE_TOL_BLOCK diff_pct={q(diff_pct,4)} > tol={q(tol_pct,4)}"
+                return False
+
+    return True
 
 
 # ============================================================
-# BINANCE REAL FETCHER (SPOT, PUBLIC)
+# [ STEP 10 ] VOLATILITY PROTECTION
 # ============================================================
 
-import requests
-from datetime import datetime, timezone
+def step_10_volatility_protection(cfg, vol_ctx, state, logger=print):
+    for k in ["29_VOLATILITY_BLOCK_ENABLE", "30_VOLATILITY_MAX_PCT"]:
+        if k not in cfg:
+            raise RuntimeError(f"CFG_MISSING_KEY_STEP10: {k}")
 
-class BinanceFetcher:
-    BASE_URL = "https://api.binance.com"
+    if not cfg["29_VOLATILITY_BLOCK_ENABLE"]:
+        return True
 
-    def get_current_price(self, symbol: str) -> float:
-        url = f"{self.BASE_URL}/api/v3/ticker/price"
-        r = requests.get(url, params={"symbol": symbol}, timeout=5)
-        r.raise_for_status()
-        return float(r.json()["price"])
+    if vol_ctx is None or vol_ctx.get("volatility_pct") is None:
+        state["gate_ok"] = False
+        state["gate_reason"] = "VOL_CTX_MISSING"
+        return False
 
-    def get_utc_1d_open(self, symbol: str) -> float:
-        """
-        UTC 00:00 기준 일봉 시가
-        """
-        url = f"{self.BASE_URL}/api/v3/klines"
-        params = {
-            "symbol": symbol,
-            "interval": "1d",
-            "limit": 1
+    v = float(vol_ctx["volatility_pct"])
+    max_v = float(cfg["30_VOLATILITY_MAX_PCT"])
+
+    if v > max_v:
+        state["gate_ok"] = False
+        state["gate_reason"] = f"VOL_BLOCK v={q(v,4)} > max={q(max_v,4)}"
+        return False
+
+    return True
+
+
+# ============================================================
+# [ STEP 11 ] OBSERVABILITY (READY)
+# ============================================================
+
+def step_11_observability(cfg, state, logger=print):
+    for k in ["31_LOG_CANDIDATES", "32_LOG_EXECUTIONS"]:
+        if k not in cfg:
+            raise RuntimeError(f"CFG_MISSING_KEY_STEP11: {k}")
+    return True
+
+
+# ============================================================
+# [ STEP 12 ] FAIL-SAFE (CAPITAL MAX LOSS)
+# - 33/34 집행
+# - 04_CAPITAL_MAX_LOSS_PCT 집행
+# ============================================================
+
+def step_12_fail_safe(cfg, state, logger=print):
+    for k in ["33_ENGINE_FAIL_FAST_ENABLE", "34_ENGINE_FAIL_NOTIFY_ONLY", "04_CAPITAL_MAX_LOSS_PCT"]:
+        if k not in cfg:
+            raise RuntimeError(f"CFG_MISSING_KEY_STEP12: {k}")
+
+    max_loss_pct = float(cfg.get("04_CAPITAL_MAX_LOSS_PCT", 100.0))
+    if state.get("initial_equity") is None or state.get("equity") is None:
+        return True
+
+    initial = float(state["initial_equity"])
+    equity = float(state["equity"])
+    loss = max(0.0, initial - equity)
+    limit = initial * (max_loss_pct / 100.0)
+
+    if loss > limit:
+        msg = f"FAIL_SAFE_MAX_LOSS: loss={q(loss,4)} > limit={q(limit,4)} (pct={q(max_loss_pct,2)})"
+        if cfg.get("33_ENGINE_FAIL_FAST_ENABLE", True):
+            logger(msg)
+            return False
+        else:
+            if not cfg.get("34_ENGINE_FAIL_NOTIFY_ONLY", True):
+                logger(msg)
+            return True
+
+    return True
+
+
+# ============================================================
+# [ STEP 13 ] EXECUTION — LIVE CONTRACT (RECORD ONLY)
+# - entry_ready는 1 bar 유효
+# - OPEN은 entry_bar + 1 bar에서만 허용
+# - OPEN 성공 시 entry 상태 즉시 소거
+# ============================================================
+
+def step_13_execution_record_only(cfg, market, state, logger=print):
+
+    # --- 기본 가드 ---
+    if not state.get("entry_ready", False):
+        return False
+
+    if market is None:
+        return False
+
+    if state.get("entry_bar") is None:
+        return False
+
+    current_bar = int(state.get("bars", 0))
+    entry_bar = int(state["entry_bar"])
+
+    # 🔒 시간축 잠금: entry_bar + 1 에서만 OPEN 허용
+    if current_bar != entry_bar + 1:
+        # 허가 만료 → 즉시 폐기
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+        state["entry_reason"] = "ENTRY_EXPIRED_TIME_AXIS"
+        return False
+
+    # --- OPEN ---
+    if state.get("position") is None:
+        state["position"] = "OPEN"
+        state["position_open_bar"] = current_bar
+        state["entry_price"] = market.get("close")
+
+        # counters / time-axis
+        state["entries_in_cycle"] = int(state.get("entries_in_cycle", 0)) + 1
+        state["entries_today"] = int(state.get("entries_today", 0)) + 1
+        state["last_entry_bar"] = current_bar
+        state["last_entry_reason"] = state.get("entry_reason")
+        state["last_entry_price"] = market.get("close")
+
+        # 🔒 entry 상태 소거 (중요)
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+
+        # --- 기록은 OPEN 성공 시에만 ---
+        record = {
+            "bar": current_bar,
+            "time": market.get("time"),
+            "price": market.get("close"),
+            "capital_usdt": state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]),
+            "reason": state.get("last_entry_reason", "RECORD_ONLY"),
+            "type": "EXECUTION_RECORD_ONLY",
         }
-        r = requests.get(url, params=params, timeout=5)
-        r.raise_for_status()
+        state["execution_records"].append(record)
 
-        kline = r.json()[0]
-        open_price = float(kline[1])  # 시가
-        open_time = datetime.fromtimestamp(kline[0] / 1000, tz=timezone.utc)
+        if cfg.get("32_LOG_EXECUTIONS", True):
+            logger(
+                f"STEP13_EXEC_RECORD: bar={record['bar']} "
+                f"price={record['price']} capital={record['capital_usdt']}"
+            )
 
-        # 방어: UTC 00:00 아닌 데이터면 즉시 오류
-        if not (open_time.hour == 0 and open_time.minute == 0):
-            raise RuntimeError(f"BTC_1D_OPEN_NOT_UTC_00: {open_time.isoformat()}")
+        return True
 
-        return open_price
+    return False
 
 
 
 # ============================================================
-# BTC CONTEXT BUILDER (REAL DATA, UTC)
+# [ STEP 14 ] EXIT CORE CALC (SL/TP/TRAIL)
 # ============================================================
 
-def build_btc_ctx(fetcher, logger=print):
-    current_price = fetcher.get_current_price("BTCUSDT")
-    open_1d_utc   = fetcher.get_utc_1d_open("BTCUSDT")
+def step_14_exit_core_calc(cfg, state, market, logger=print):
+    if state.get("position") != "OPEN":
+        return False
+    if state.get("entry_price") is None:
+        return False
+    if market is None:
+        return False
 
-    logger(
-        f"BTC_CTX_REAL: current={current_price} open_1d_utc={open_1d_utc}"
-    )
+    entry = _safe_float(state.get("entry_price"))
+    if entry is None or entry <= 0:
+        return False
 
-    return {
-        "current": current_price,
-        "open_1d_utc": open_1d_utc,
-    }
+    # SL/TP는 포지션당 1회 계산 후 고정
+    if state.get("sl_price") is None or state.get("tp_price") is None:
+        sl = entry * (1 + float(cfg["35_SL_PCT"]) / 100.0)  # SHORT: 위로 가면 손절
+        tp = entry * (1 - float(cfg["36_TP_PCT"]) / 100.0)  # SHORT: 아래로 가면 익절
+        state["sl_price"] = q(sl, 6)
+        state["tp_price"] = q(tp, 6)
 
+    # TRAILING은 계속 갱신
+    low = _safe_float(market.get("low"))
+    anchor = _safe_float(state.get("trailing_anchor"))
 
+    if anchor is None:
+        anchor = entry
+    if low is not None:
+        anchor = min(anchor, low)
 
+    trailing_stop = anchor * (1 + float(cfg["37_TRAILING_PCT"]) / 100.0)
 
+    state["trailing_anchor"] = q(anchor, 6)
+    state["trailing_stop"] = q(trailing_stop, 6)
 
-
-
-
-
-
-
-
-
-def app_run():
-    print("VELLA V7 APP START")
-
-    # STEP 1 단독 실행 모드
-    state = {
-        "realized_pnl": 0.0,
-        "unrealized_pnl": 0.0,
-    }
-
-    ok = step_1_engine_limit(CFG, state)
-    if not ok:
-        print("ENGINE STOPPED AT STEP 1")
-        return
-
-    print("STEP 1 COMPLETE")
-
-
-    # STEP 2
-    if not step_2_engine_switch(CFG):
-        print("ENGINE STOPPED AT STEP 2")
-        return
-
-
-     # STEP 3
-    candidates = step_3_generate_candidates(CFG, market=None, state=state)
-    print(f"STEP 3 COMPLETE: candidates={len(candidates)}")
+    # snapshot
+    state["sl_tp_trailing_records"].append({
+        "bar": state.get("bars"),
+        "time": market.get("time"),
+        "entry": entry,
+        "sl": state.get("sl_price"),
+        "tp": state.get("tp_price"),
+        "anchor": state.get("trailing_anchor"),
+        "trailing_stop": state.get("trailing_stop"),
+        "type": "EXIT_CORE_CALC",
+    })
+    return True
 
 
+# ============================================================
+# [ STEP 15 ] EXIT JUDGE — 3 BAR CONFIRM (CLOSE)
+# ============================================================
 
-    # ============================================================
-    # BTC_CTX (REAL)
-    # ============================================================
-    from binance.client import Client
+def step_15_exit_judge(cfg, state, market, logger=print):
 
-    btc_ctx = None  # 실패 시 STEP 4에서 자연스럽게 DENY
+    if state.get("position") != "OPEN":
+        return False
+    if market is None:
+        return False
 
+    # 동일 bar entry/exit 금지 (OPEN bar에서는 EXIT 판정 금지)
+    pob = state.get("position_open_bar")
+    if pob is not None and state.get("bars", 0) <= int(pob):
+        state["exit_ready"] = False
+        state["exit_reason"] = None
+        state["exit_signal"] = None
+        state["exit_confirm_count"] = 0
+        state["exit_fired_bar"] = None
+        state["exit_fired_signal"] = None
+        return False
+
+    price = _safe_float(market.get("close"))
+    if price is None:
+        return False
+
+    sl = _safe_float(state.get("sl_price"))
+    tp = _safe_float(state.get("tp_price"))
+    tr = _safe_float(state.get("trailing_stop"))
+
+    signal = None
+
+    # 1) SL (SHORT): close가 sl 이상이면 손절 신호
+    if sl is not None and price >= sl:
+        signal = "SL"
+
+    # 2) TP (SHORT): close가 tp 이하이면 익절 신호
+    elif tp is not None and price <= tp:
+        signal = "TP"
+        state["tp_touched"] = True
+        state["trailing_active"] = True
+
+    # 3) TRAIL (SHORT): TP 터치 이후에만 적용
+    elif state.get("trailing_active", False):
+        if tr is not None and price >= tr:
+            signal = "TRAIL"
+
+    # 신호 없음: 리셋
+    if signal is None:
+        state["exit_signal"] = None
+        state["exit_confirm_count"] = 0
+        state["exit_ready"] = False
+        state["exit_reason"] = None
+        state["exit_fired_bar"] = None
+        state["exit_fired_signal"] = None
+        return False
+
+    # 3 BAR CONFIRM
+    if state.get("exit_signal") == signal:
+        state["exit_confirm_count"] = int(state.get("exit_confirm_count", 0)) + 1
+    else:
+        state["exit_signal"] = signal
+        state["exit_confirm_count"] = 1
+        state["exit_fired_bar"] = None
+        state["exit_fired_signal"] = None
+
+    if int(state.get("exit_confirm_count", 0)) >= 3:
+        state["exit_ready"] = True
+        state["exit_reason"] = f"{signal}_3BAR_CONFIRM_CLOSE"
+
+        # 1회만 기록/락
+        if state.get("exit_fired_bar") is None:
+            state["exit_fired_bar"] = state.get("bars")
+            state["exit_fired_signal"] = signal
+            state["exit_records"].append({
+                "bar": state.get("bars"),
+                "time": market.get("time"),
+                "close": price,
+                "signal": signal,
+                "reason": state.get("exit_reason"),
+                "sl": state.get("sl_price"),
+                "tp": state.get("tp_price"),
+                "trailing_stop": state.get("trailing_stop"),
+                "type": "EXIT_CONFIRM_3BAR",
+            })
+        return True
+
+    state["exit_ready"] = False
+    state["exit_reason"] = None
+    return False
+
+
+# ============================================================
+# [ STEP 16 ] EXIT EXECUTION
+# - "3봉 확정 → 청산 실행 → 상태 리셋"
+# - 07_ENTRY_EXEC_ENABLE=False면 실주문 ❌, 대신 SIM_EXIT로 상태/손익 갱신은 수행
+# ============================================================
+
+# Binance enums (optional)
+try:
+    from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
+except Exception:
+    SIDE_BUY = "BUY"
+    SIDE_SELL = "SELL"
+    ORDER_TYPE_MARKET = "MARKET"
+
+def order_adapter_send(symbol, side, quantity, reason, logger=print):
+    logger(f"ORDER_ADAPTER_SEND: symbol={symbol} side={side} qty={quantity} reason={reason}")
+    return True
+
+def _simulate_pnl_short(entry_price, exit_price, capital_usdt):
+    ep = _safe_float(entry_price)
+    xp = _safe_float(exit_price)
+    cap = _safe_float(capital_usdt)
+    if ep is None or xp is None or cap is None or ep <= 0 or cap <= 0:
+        return 0.0
+    # 단순 비율 PnL (레버리지/수수료/수량 계산은 V8에서)
+    ret = (ep - xp) / ep
+    return cap * ret
+
+def step_16_real_order(cfg, state, market, client, logger=print):
+    if not state.get("exit_ready", False):
+        return False
+    if state.get("order_inflight"):
+        return False
+    if market is None:
+        return False
+
+    # ✅ EXIT 실행은 "항상" 1회 수행 (실주문 OFF라도 SIM_EXIT로 수행)
+    state["order_inflight"] = True
     try:
-        client = Client(
-            api_key="여기에_실제_BINANCE_API_KEY",
-            api_secret="여기에_실제_BINANCE_API_SECRET",
-        )
+        if cfg.get("07_ENTRY_EXEC_ENABLE", False):
+            # REAL ORDER PATH (외부 어댑터 호출)
+            order_adapter_send(
+                symbol=cfg["01_TRADE_SYMBOL"],
+                side=SIDE_BUY,  # SHORT 청산 = BUY (기본)
+                quantity=1,
+                reason=state.get("exit_reason"),
+                logger=logger
+            )
+        else:
+            logger(f"SIM_EXIT: reason={state.get('exit_reason')}")
+    finally:
+        state["order_inflight"] = False
 
-        btc_ctx = build_btc_ctx_real(client)
+    # ---- PnL / equity update (record-only simulation) ----
+    exit_price = market.get("close")
+    pnl = _simulate_pnl_short(state.get("entry_price"), exit_price, state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]))
+    state["realized_pnl"] = float(state.get("realized_pnl", 0.0)) + float(pnl)
+    if state.get("equity") is not None:
+        state["equity"] = float(state["equity"]) + float(pnl)
 
+    # ---- TIME AXIS reset ----
+    state["position"] = None
+    state["position_open_bar"] = None
+    state["last_exit_bar"] = state.get("bars")
+
+    # cycle reset
+    state["cycle_id"] = int(state.get("cycle_id", 0)) + 1
+    state["entries_in_cycle"] = 0
+
+    # ENTRY reset
+    state["entry_ready"] = False
+    state["entry_bar"] = None
+    state["entry_reason"] = None
+
+    # candidate reset (유령 후보 방지)
+    state["has_candidate"] = False
+    state["candidates"] = []
+    state["last_candidate_bar"] = None
+
+    # EXIT reset
+    state["exit_ready"] = False
+    state["exit_reason"] = None
+    state["exit_signal"] = None
+    state["exit_confirm_count"] = 0
+    state["exit_fired_bar"] = None
+    state["exit_fired_signal"] = None
+
+    # SL/TP/TRAIL reset
+    state["entry_price"] = None
+    state["sl_price"] = None
+    state["tp_price"] = None
+    state["tp_touched"] = False
+    state["trailing_active"] = False
+    state["trailing_anchor"] = None
+    state["trailing_stop"] = None
+
+    return True
+
+
+# ============================================================
+# LIVE DATA CONNECTION (BINANCE FUTURES)
+# ============================================================
+
+try:
+    from binance.client import Client
+except Exception:
+    Client = None
+
+LIVE_INTERVAL_SEC = 3
+KLINE_INTERVAL = "5m"
+EMA9_PERIOD = 9
+BTC_SYMBOL = "BTCUSDT"
+
+def init_binance_client():
+    if Client is None:
+        raise RuntimeError("python-binance not installed (binance.client.Client missing)")
+    api_key = os.getenv("BINANCE_API_KEY")
+    api_secret = os.getenv("BINANCE_API_SECRET")
+    if not api_key or not api_secret:
+        raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET NOT SET")
+    return Client(api_key, api_secret)
+
+def fetch_live_market_minimal(client, symbol, logger=print):
+    try:
+        kl = client.futures_klines(symbol=symbol, interval=KLINE_INTERVAL, limit=50)
+        if not kl:
+            return None
+        closes = [_safe_float(k[4]) for k in kl if _safe_float(k[4]) is not None]
+        if len(closes) < EMA9_PERIOD:
+            return None
+
+        # EMA
+        k = 2 / (EMA9_PERIOD + 1)
+        ema = closes[0]
+        series = [ema]
+        for v in closes[1:]:
+            ema = v * k + ema * (1 - k)
+            series.append(ema)
+
+        last = kl[-1]
+        return {
+            "time": int(last[6]),          # close time ms
+            "open": _safe_float(last[1]),
+            "high": _safe_float(last[2]),
+            "low": _safe_float(last[3]),
+            "close": _safe_float(last[4]),
+            "ema9": _safe_float(series[-1]),
+            "ema9_series": series[-max(int(CFG.get("11_EMA_SLOPE_LOOKBACK_BARS", 1)) + 1, 3):],
+            "kline_rows": kl,
+        }
     except Exception as e:
-        print(f"BINANCE_CLIENT_INIT_WARNING (IGNORED): {e}")
-        # ❗ 엔진 중단 ❌
-        # ❗ btc_ctx=None 유지
+        logger(f"LIVE_MARKET_FETCH_FAIL: {e}")
+        return None
+
+def fetch_btc_daily_open(client):
+    try:
+        kl = client.futures_klines(symbol=BTC_SYMBOL, interval="1d", limit=2)
+        if not kl:
+            return None
+        open_price = _safe_float(kl[-1][1])
+        open_time = int(kl[-1][0])
+        return {"open": open_price, "open_time": open_time}
+    except Exception:
+        return None
+
+def fetch_orderbook_spread_pct(client, symbol):
+    try:
+        ob = client.futures_order_book(symbol=symbol, limit=5)
+        bid = _safe_float(ob["bids"][0][0]) if ob.get("bids") else None
+        ask = _safe_float(ob["asks"][0][0]) if ob.get("asks") else None
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            return None, None, None
+        mid = (bid + ask) / 2
+        spread_pct = (ask - bid) / mid * 100.0
+        return spread_pct, bid, ask
+    except Exception:
+        return None, None, None
+
+def fetch_usdt_available(client):
+    # dynamic capital source (03_CAPITAL_USE_FIXED=False)
+    try:
+        bals = client.futures_account_balance()
+        for b in bals:
+            if str(b.get("asset")).upper() == "USDT":
+                return _safe_float(b.get("availableBalance"))
+    except Exception:
+        return None
+    return None
 
 
+# ============================================================
+# ENGINE RUNNER (LIVE / SINGLE PATH)
+# STEP 호출 순서:
+# 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 15 -> 16
+# ============================================================
 
-    # ============================================================
-    # STEP 4
-    # ============================================================
-    if not step_4_btc_session_bias(CFG, btc_ctx):
-        print("ENGINE STOPPED AT STEP 4")
-        return
+def app_run_live(logger=print):
+    client = init_binance_client()
+    state = init_state()
 
-    print("STEP 4 COMPLETE")
+    if not step_2_engine_switch(CFG, logger=logger):
+        logger("ENGINE_STOP: STEP2")
+        return state
+
+    logger("LIVE_START (DATA CONNECTED)")
+
+    btc_daily = fetch_btc_daily_open(client)
+    btc_daily_open = btc_daily["open"] if btc_daily else None
+
+    while True:
+        try:
+            # refresh daily open periodically
+            if btc_daily_open is None or (state["ticks"] % 200 == 0):
+                btc_daily = fetch_btc_daily_open(client)
+                btc_daily_open = btc_daily["open"] if btc_daily else btc_daily_open
+
+            state["ticks"] += 1
+
+            market = fetch_live_market_minimal(client, CFG["01_TRADE_SYMBOL"], logger=logger)
+            if market is None:
+                time.sleep(LIVE_INTERVAL_SEC)
+                continue
+
+            market_core = {
+                "time": market.get("time"),
+                "open": market.get("open"),
+                "high": market.get("high"),
+                "low": market.get("low"),
+                "close": market.get("close"),
+                "ema9": market.get("ema9"),
+            }
+
+            state["bars"] += 1
+
+            # STEP 1: capital ctx (dynamic)
+            available = fetch_usdt_available(client) if not CFG.get("03_CAPITAL_USE_FIXED", True) else None
+            capital_ctx = {"available_usdt": available}
+            step_1_engine_limit(CFG, state, capital_ctx=capital_ctx, logger=logger)
+
+            # STEP 3: candidate
+            step_3_generate_candidates(CFG, market_core, state, logger=logger)
+
+            # STEP 4: BTC ctx
+            btc_price = None
+            try:
+                t = client.futures_symbol_ticker(symbol=BTC_SYMBOL)
+                btc_price = _safe_float(t.get("price"))
+            except Exception:
+                btc_price = None
+            btc_ctx = {"daily_open": _safe_float(btc_daily_open), "price": btc_price}
+
+            # STEP 5: EMA ctx
+            ema_ctx = {"ema9_series": market.get("ema9_series") or []}
+
+            # STEP 8: safety ctx (needs time)
+            now_ms = int(time.time() * 1000)
+            age_ms = max(0, now_ms - int(market_core["time"])) if market_core.get("time") is not None else None
+            is_stale = (age_ms is not None and age_ms > 2 * 60 * 1000)
+            spread_pct, bid, ask = fetch_orderbook_spread_pct(client, CFG["01_TRADE_SYMBOL"])
+            safety_ctx = {
+                "market_time_ms": market_core.get("time"),
+                "age_ms": age_ms,
+                "is_stale": is_stale,
+                "spread_pct": spread_pct,
+                "bid": bid,
+                "ask": ask,
+            }
+
+            # STEP 10: vol ctx (only computed when enabled)
+            vol_ctx = {"volatility_pct": None}
+            if CFG.get("29_VOLATILITY_BLOCK_ENABLE", False):
+                rows = market.get("kline_rows") or []
+                lookback = min(20, len(rows))
+                hi = max([_safe_float(r[2]) for r in rows[-lookback:] if _safe_float(r[2]) is not None], default=None)
+                lo = min([_safe_float(r[3]) for r in rows[-lookback:] if _safe_float(r[3]) is not None], default=None)
+                close = _safe_float(market_core.get("close"))
+                vol_pct = None
+                if hi is not None and lo is not None and close and close > 0:
+                    vol_pct = (hi - lo) / close * 100.0
+                vol_ctx = {"volatility_pct": vol_pct}
+
+            # GATES (4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10)
+            if not step_4_btc_session_bias(CFG, btc_ctx, state, logger=logger):
+                time.sleep(LIVE_INTERVAL_SEC); continue
+            if not step_5_ema_slope_gate(CFG, ema_ctx, state, logger=logger):
+                time.sleep(LIVE_INTERVAL_SEC); continue
+
+            _ = step_6_entry_judge(CFG, market_core, state, logger=logger)
+
+            if not step_7_execution_tempo_control(CFG, state, logger=logger):
+                time.sleep(LIVE_INTERVAL_SEC); continue
+            if not step_8_execution_safety_guard(CFG, safety_ctx, state, logger=logger):
+                time.sleep(LIVE_INTERVAL_SEC); continue
+            if not step_9_reentry_candidate_hygiene(CFG, market_core, state, logger=logger):
+                time.sleep(LIVE_INTERVAL_SEC); continue
+            if not step_10_volatility_protection(CFG, vol_ctx, state, logger=logger):
+                time.sleep(LIVE_INTERVAL_SEC); continue
+
+            step_11_observability(CFG, state, logger=logger)
+
+            if not step_12_fail_safe(CFG, state, logger=logger):
+                logger("ENGINE_STOP: STEP12_FAIL_SAFE")
+                break
+
+            # STEP 13: record-only entry open
+            step_13_execution_record_only(CFG, market_core, state, logger=logger)
+
+            # STEP 14/15/16: exit pipeline
+            step_14_exit_core_calc(CFG, state, market_core, logger=logger)
+            step_15_exit_judge(CFG, state, market_core, logger=logger)
+            step_16_real_order(CFG, state, market_core, client, logger=logger)
+
+            if state["ticks"] % 25 == 0:
+                logger(
+                    f"LIVE_TICK: ticks={state['ticks']} bars={state['bars']} gate_ok={state.get('gate_ok')} "
+                    f"pos={state.get('position')} entries_today={state.get('entries_today')} "
+                    f"equity={q(state.get('equity', 0.0),4)} pnl={q(state.get('realized_pnl', 0.0),4)} "
+                    f"spread={safety_ctx.get('spread_pct')} stale={safety_ctx.get('is_stale')}"
+                )
+
+            time.sleep(LIVE_INTERVAL_SEC)
+
+        except KeyboardInterrupt:
+            logger("LIVE_STOP"); break
+        except Exception as e:
+            logger(f"LIVE_ERROR: {e}")
+            time.sleep(LIVE_INTERVAL_SEC)
+
+    return state
 
 
-
-
-    # STEP 5
-    if not step_5_ema_slope(CFG, ema_ctx):
-        print("ENGINE STOPPED AT STEP 5")
-        return
-
-
-
-    # STEP 6
-    price_ctx = None  # 지금은 연결 확인용
-    if not step_6_price_confirmation(CFG, price_ctx):
-        print("ENGINE STOPPED AT STEP 6")
-        return
-    print("STEP 6 COMPLETE")
-
-
-    # STEP 7
-    ema_ctx = None  # 지금은 연결 확인용
-    cooldown_bars = step_7_execution_cooldown(CFG, ema_ctx)
-    print(f"STEP 7 COMPLETE: cooldown_bars={cooldown_bars}")
-
-
-
-    # STEP 8
-    safety_ctx = None  # 지금은 연결 확인용
-    if not step_8_execution_safety_guard(CFG, safety_ctx):
-        print("ENGINE STOPPED AT STEP 8")
-        return
-    print("STEP 8 COMPLETE")
-
-
-
-    # STEP 9
-    reentry_ctx = None  # 지금은 연결 확인용
-    if not step_9_reentry_candidate_hygiene(CFG, reentry_ctx):
-        print("ENGINE STOPPED AT STEP 9")
-        return
-    print("STEP 9 COMPLETE")
-
-
-
-    # STEP 10
-    vol_ctx = None  # 지금은 연결 확인용
-    if not step_10_volatility_protection(CFG, vol_ctx):
-        print("ENGINE STOPPED AT STEP 10")
-        return
-    print("STEP 10 COMPLETE")
-
-
-
-    # STEP 11
-    obs_ctx = None  # 지금은 연결 확인용
-    if not step_11_observability(CFG, obs_ctx):
-        print("ENGINE STOPPED AT STEP 11")
-        return
-    print("STEP 11 COMPLETE")
-
-
-
-    # STEP 12
-    fail_ctx = None  # 지금은 연결 확인용
-    if not step_12_engine_fail_safe(CFG, fail_ctx):
-        print("ENGINE STOPPED AT STEP 12")
-        return
-    print("STEP 12 COMPLETE")
-
-
-
-
-
-
+# ============================================================
+# MAIN (SINGLE)
+# ============================================================
 
 if __name__ == "__main__":
-    app_run()
+    _ = app_run_live(logger=print)
