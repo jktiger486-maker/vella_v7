@@ -34,7 +34,7 @@ CFG = {
     # =====================================================
     "05_ENGINE_ENABLE": True,
     "06_ENTRY_CANDIDATE_ENABLE": True,
-    "07_ENTRY_EXEC_ENABLE": False,  # 🔒 실주문 차단 (STEP A 핵심)
+    "07_ENTRY_EXEC_ENABLE": True,  # 🔒 실주문 차단 (STEP A 핵심)
 
     # =====================================================
     # [ STEP 3 ] 후보 생성
@@ -79,7 +79,7 @@ CFG = {
     "21_ENTRY_COOLDOWN_BARS": 0,
     "22_ENTRY_COOLDOWN_AFTER_EXIT": 0,
     "23_REENTRY_SAME_REASON_BLOCK": False,
-    "24_ENTRY_LOOKBACK_BARS": 1,
+    "24_ENTRY_LOOKBACK_BARS": 2,
     "25_REENTRY_PRICE_TOL_PCT": 100,
     "26_CAND_POOL_TTL_BARS": 50,
     "27_CAND_POOL_MAX_SIZE": 50,
