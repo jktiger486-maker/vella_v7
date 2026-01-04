@@ -24,7 +24,7 @@ CFG = {
     # =====================================================
     # [ STEP 1 ] 거래 대상 · 자본 · 손실 한계
     # =====================================================
-    "01_TRADE_SYMBOL": "SUIUSDT",
+    "01_TRADE_SYMBOL": "IMXUSDT",
     "02_CAPITAL_BASE_USDT": 60,
     "03_CAPITAL_USE_FIXED": True,
     "04_CAPITAL_MAX_LOSS_PCT": 100.0,  # 100%면 사실상 차단 없음
@@ -34,7 +34,7 @@ CFG = {
     # =====================================================
     "05_ENGINE_ENABLE": True,
     "06_ENTRY_CANDIDATE_ENABLE": True,
-    "07_ENTRY_EXEC_ENABLE": True,  # 🔒 실주문 차단 (STEP A 핵심)
+    "07_ENTRY_EXEC_ENABLE": True,  # 🔒 실주문 허용 (STEP A 핵심)
 
     # =====================================================
     # [ STEP 3 ] 후보 생성
@@ -50,7 +50,7 @@ CFG = {
     # [ STEP 5 ] EMA SLOPE
     # =====================================================
     "10_EMA_SLOPE_MIN_PCT": 0.0,
-    "11_EMA_SLOPE_LOOKBACK_BARS": 1,
+    "11_EMA_SLOPE_LOOKBACK_BARS": 0,
 
     # =====================================================
     # [ STEP 6 ] PRICE CONFIRM (ENTRY FINAL)
@@ -68,10 +68,10 @@ CFG = {
     # =====================================================
     # [ STEP 8 ] 실행 안전장치 (LIMITS / STALE / SPREAD)
     # =====================================================
-    "17_ENTRY_MAX_PER_CYCLE": 1,
+    "17_ENTRY_MAX_PER_CYCLE": 2,
     "18_MAX_ENTRIES_PER_DAY": 20,
-    "19_DATA_STALE_BLOCK": True,                 # ✅ ON
-    "20_EXECUTION_SPREAD_GUARD_ENABLE": True,    # ✅ ON
+    "19_DATA_STALE_BLOCK": False,                 # ✅ ON
+    "20_EXECUTION_SPREAD_GUARD_ENABLE": False,    # ✅ ON
 
     # =====================================================
     # [ STEP 9 ] 재진입 관리 · 후보 정리
@@ -79,10 +79,10 @@ CFG = {
     "21_ENTRY_COOLDOWN_BARS": 0,
     "22_ENTRY_COOLDOWN_AFTER_EXIT": 0,
     "23_REENTRY_SAME_REASON_BLOCK": False,
-    "24_ENTRY_LOOKBACK_BARS": 2,
+    "24_ENTRY_LOOKBACK_BARS": 100,
     "25_REENTRY_PRICE_TOL_PCT": 100,
-    "26_CAND_POOL_TTL_BARS": 50,
-    "27_CAND_POOL_MAX_SIZE": 50,
+    "26_CAND_POOL_TTL_BARS": 100,
+    "27_CAND_POOL_MAX_SIZE": 100,
     "28_CAND_MIN_GAP_BARS": 0,
 
     # =====================================================
@@ -134,6 +134,10 @@ def init_state():
     return {
         "ticks": 0,
         "bars": 0,
+
+
+        # ✅ LIVE BAR TRACKING (STATE CONTRACT: explicit key)
+        "_last_bar_time": None,
 
         # candidate
         "has_candidate": False,
@@ -805,25 +809,34 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
     # --- 기본 가드 ---
     if not state.get("entry_ready", False):
         return False
-
     if market is None:
         return False
-
     if state.get("entry_bar") is None:
         return False
 
     current_bar = int(state.get("bars", 0))
     entry_bar = int(state["entry_bar"])
 
-    # 🔒 시간축 잠금: entry_bar + 1 에서만 OPEN 허용
-    if current_bar != entry_bar + 1:
-        # 허가 만료 → 즉시 폐기
+    # --------------------------------------------------------
+    # LIVE CONTRACT TIME AXIS
+    # 1) 같은 bar(entry_bar)에서는 "대기" (아무 것도 하지 않음)
+    # 2) 정확히 다음 bar(entry_bar + 1)에서만 OPEN
+    # 3) 그 이후(bar > entry_bar + 1)는 만료(ENTRY_EXPIRED)
+    # --------------------------------------------------------
+
+    # 1) 같은 bar: 대기
+    if current_bar == entry_bar:
+        return False
+
+    # 3) 너무 늦음: 만료
+    if current_bar > entry_bar + 1:
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "ENTRY_EXPIRED_TIME_AXIS"
         return False
 
-    # --- OPEN ---
+    # 2) 정확히 다음 bar: OPEN
+    # 여기까지 왔다는 건 current_bar == entry_bar + 1
     if state.get("position") is None:
         state["position"] = "OPEN"
         state["position_open_bar"] = current_bar
@@ -860,6 +873,7 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
         return True
 
     return False
+
 
 
 
@@ -1238,7 +1252,22 @@ def app_run_live(logger=print):
                 "ema9": market.get("ema9"),
             }
 
-            state["bars"] += 1
+
+            # ====================================================
+            # BAR ADVANCE — 5m KLINE CLOSE ONLY (LIVE SAFE)
+            # ====================================================
+            kline_rows = market.get("kline_rows") or []
+            last_close_time = None
+
+            if kline_rows:
+                last_close_time = int(kline_rows[-1][6])  # close_time ms
+
+            if last_close_time is not None:
+                if state.get("_last_bar_time") != last_close_time:
+                    state["_last_bar_time"] = last_close_time
+                    state["bars"] += 1
+
+
 
             # STEP 1: capital ctx (dynamic)
             available = fetch_usdt_available(client) if not CFG.get("03_CAPITAL_USE_FIXED", True) else None
