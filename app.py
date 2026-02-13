@@ -26,7 +26,7 @@ CFG = {
     # -------------------------
     # BASIC
     # -------------------------
-    "01_TRADE_SYMBOL": "MUSDT",
+    "01_TRADE_SYMBOL": "SOLUSDT",
     "02_INTERVAL": "5m",
     "03_CAPITAL_BASE_USDT": 30.0,
     "04_LEVERAGE": 1,
