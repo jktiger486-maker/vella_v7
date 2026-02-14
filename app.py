@@ -2,7 +2,7 @@
 # VELLA_v7_BASE — LONG ENGINE (Experimental EMA3 Cross Mode)
 # - EXECUTION CORE: based on v9 proven trade plumbing (lotSize/qty/order/reduceOnly/closed-bar loop)
 # - ENTRY: PURE EMA10/15/20 cross (NO filters, NO pullback, NO slope, NO peak)
-# - EXIT: Bella rule (close < avg(prev N closed closes))  [default N=2, CFG adjustable]
+# - EXIT: close < EMA15
 # - TIME AXIS: REST closed-bar only (kline[-2])
 # ============================================================
 
@@ -49,12 +49,6 @@ CFG = {
     # -------------------------
     "20_ENTRY_COOLDOWN_BARS": 1,     # 엔트리/엑시트 후 재진입 쿨다운(봉수)
     "21_MAX_ENTRY_PER_TREND": 1,     # [UNUSED in BASE] 추세 사이클 제한 없음
-
-    # -------------------------
-    # EXIT (Bella)
-    # -------------------------
-    "30_EXIT_AVG_N": 3,              # 기본값 2, CFG로 조정
-    "31_EXIT_USE_PREV_N_ONLY": True, # True: avg=prev N closes(현재봉 제외). False면 포함(권장X)
 
     # -------------------------
     # EXIT OPTIONS (plug-in slots; default OFF)
@@ -202,8 +196,6 @@ class Position:
     qty: float
     entry_bar: int
 
-# ⚠️ ClaudeEntryState 제거됨 (BASE 모드에서 불필요)
-
 @dataclass
 class EngineState:
     bar: int = 0
@@ -211,7 +203,7 @@ class EngineState:
     cooldown_until_bar: int = 0
     position: Optional[Position] = None
     close_history: List[float] = field(default_factory=list)
-    low_history: List[float] = field(default_factory=list)  # 유지 (엔진 안정성)
+    low_history: List[float] = field(default_factory=list)
 
 # ============================================================
 # ENTRY (BASE MODE - PURE EMA3 CROSS)
@@ -231,52 +223,28 @@ def base_entry_signal(closes: List[float]) -> bool:
             now:  ema10[-1] > ema15[-1]
             AND ema15[-1] > ema20[-1]
     """
-    if len(closes) < 40:  # EMA20 안정화용 최소 데이터
+    if len(closes) < 40:
         return False
 
     ema10_s = ema_series(closes, CFG["10_EMA_FAST"])
     ema15_s = ema_series(closes, CFG["11_EMA_MID"])
     ema20_s = ema_series(closes, CFG["12_EMA_SLOW"])
 
-    # 현재봉 (마지막 완료봉)
     ema10_now = ema10_s[-1]
     ema15_now = ema15_s[-1]
     ema20_now = ema20_s[-1]
 
-    # 이전봉
     ema10_prev = ema10_s[-2]
     ema15_prev = ema15_s[-2]
 
-    # LONG 시그널
     cross_up = (ema10_prev <= ema15_prev) and (ema10_now > ema15_now)
     stack_long = ema15_now > ema20_now
     
     return cross_up and stack_long
 
 # ============================================================
-# EXIT (Bella core + options)
+# EXIT (close < EMA15)
 # ============================================================
-
-def bella_exit_core_avg_break(closes: List[float], n: int) -> bool:
-    """
-    Bella core:
-      - avg = mean(prev N closed closes)
-      - exit if current_close < avg
-    """
-    n = int(n)
-    if n <= 0:
-        return False
-    if len(closes) < n + 1:
-        return False
-
-    current = closes[-1]
-    if CFG["31_EXIT_USE_PREV_N_ONLY"]:
-        prev = closes[-(n + 1):-1]
-        avg = sum(prev) / n
-    else:
-        avg = sum(closes[-n:]) / n
-
-    return current < avg
 
 def exit_option_sl(close: float, entry_price: float) -> bool:
     if not CFG["40_SL_ENABLE"]:
@@ -291,10 +259,10 @@ def exit_option_timeout(current_bar: int, entry_bar: int) -> bool:
 
 def exit_signal(state: EngineState) -> bool:
     """
-    Exit priority (clean, extendable):
+    Exit priority:
       1) SL (optional)
       2) TIMEOUT (optional)
-      3) Bella core avg-break (always ON)
+      3) close < EMA15
     """
     pos = state.position
     if pos is None:
@@ -307,8 +275,10 @@ def exit_signal(state: EngineState) -> bool:
     if exit_option_timeout(state.bar, pos.entry_bar):
         return True
 
-    n = int(CFG["30_EXIT_AVG_N"])
-    if bella_exit_core_avg_break(state.close_history, n):
+    ema15_s = ema_series(state.close_history, CFG["11_EMA_MID"])
+    ema15_now = ema15_s[-1]
+    
+    if close < ema15_now:
         return True
 
     return False
@@ -399,18 +369,15 @@ def engine():
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
 
-            completed = kl[-2]                  # closed bar
-            open_time = int(completed[0])       # ms
+            completed = kl[-2]
+            open_time = int(completed[0])
 
             if st.last_open_time == open_time:
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
 
-            # ===============================
-            # COLD START SEED (RUN ONCE)
-            # ===============================
             if not st.close_history:
-                for k in kl[:-1]:  # 마지막(현재 미완성봉) 제외, 완료봉만
+                for k in kl[:-1]:
                     st.close_history.append(float(k[4]))
                     st.low_history.append(float(k[3]))
                 st.bar = len(st.close_history)
@@ -426,20 +393,14 @@ def engine():
             st.close_history.append(close)
             st.low_history.append(low)
 
-            # keep history bounded
             if len(st.close_history) > 2000:
                 st.close_history = st.close_history[-2000:]
                 st.low_history = st.low_history[-2000:]
 
-            # -------------------------
-            # POSITION LOGIC
-            # -------------------------
             if st.position is None:
-                # cooldown check
                 if st.bar < st.cooldown_until_bar:
                     continue
 
-                # ENTRY SIGNAL (BASE MODE)
                 sig_entry = base_entry_signal(st.close_history)
                 
                 if sig_entry:
@@ -460,7 +421,6 @@ def engine():
                     else:
                         log.error("[ENTRY_FAIL] order failed")
             else:
-                # avoid same-bar entry-exit
                 if st.position.entry_bar == st.bar:
                     continue
 
@@ -470,7 +430,6 @@ def engine():
                         log.info(f"[EXIT] LONG close={close} entry={st.position.entry_price} bar={st.bar}")
                         st.position = None
 
-                        # cooldown after exit
                         cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
                         if cd > 0:
                             st.cooldown_until_bar = st.bar + cd
