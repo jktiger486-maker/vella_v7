@@ -1,7 +1,7 @@
 # ============================================================
-# VELLA_v7_BASE — LONG ENGINE (RAW + Slope Filter 1)
+# VELLA_v10_BASE — LONG ONLY (EMA9↑EMA14 / EXIT=EMA4)
 # - EXECUTION CORE: based on v9 proven trade plumbing (lotSize/qty/order/reduceOnly/closed-bar loop)
-# - ENTRY: EMA9 crosses ABOVE EMA14 (Golden Cross) + optional Slope filter
+# - ENTRY: EMA9 crosses ABOVE EMA14 (Golden Cross)
 # - EXIT: close < EMA4 (CLOSE_LT_EMA mode default)
 # - TIME AXIS: REST closed-bar only (kline[-2])
 # ============================================================
@@ -19,16 +19,16 @@ from typing import Optional, Dict, Any, List
 # ============================================================
 # CFG (ALL CONTROL HERE)
 # ============================================================
-# 20260210_BASE : v7 엔트리를 순수 EMA3선 교차로 교체 (실험 모드)
-# 20260217_RAW  : EMA9↑EMA14 확정 / EXIT=EMA4 / Slope 필터 1 추가 / 브10 구조 통일
+# 20250210_BASE : 완전 단순 EMA3선 교차 실험 모드
+# 20260217_LONG : EMA9↑EMA14 확정 / EXIT=EMA4 / SHORT/stack 제거
 
 CFG = {
     # -------------------------
     # BASIC
     # -------------------------
-    "01_TRADE_SYMBOL": "SOLUSDT",
+    "01_TRADE_SYMBOL": "CCUSDT",
     "02_INTERVAL": "5m",
-    "03_CAPITAL_BASE_USDT": 30.0,
+    "03_CAPITAL_BASE_USDT": 10.0,
     "04_LEVERAGE": 1,
 
     # -------------------------
@@ -48,24 +48,6 @@ CFG = {
     # -------------------------
     "30_EXIT_EMA": 4,
     "31_EXIT_MODE": "CLOSE_LT_EMA",  # "CLOSE_LT_EMA" / "CROSSUNDER"
-
-    # -------------------------
-    # FILTER 1: Slope (ON/OFF)
-    # -------------------------
-    "60_FILTER_SLOPE_ENABLE": True,
-    "61_SLOPE_BARS": 2,
-    # [권장 범위]
-    # 1  → 바로 직전 봉 대비 변화율 > 가장 민감, 하루 6~12회
-    # 2  → 빠른 반응 (신호 증가), 하루 4~8회
-    # 3  → 더 보수적 (신호 감소), 하루 2~5회
-    "62_SLOPE_MIN_PCT": 0.005,   
-    # [권장 범위]
-    # 0.003  = 0.3%   → 매우 강함 (거의 안 나옴)
-    # 0.001  = 0.1%   → 강한 추세만 통과
-    # 0.0005 = 0.05%  → ★ 권장값 (하루 4~8회 기대)
-    # 0.0003 = 0.03%  → 공격적 (신호 증가, DD 상승 가능)
-    # 0.0    = 사실상 필터 OFF
-  
 
     # -------------------------
     # EXIT OPTIONS (plug-in slots; default OFF)
@@ -93,7 +75,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("VELLA_v7_BASE")
+log = logging.getLogger("VELLA_v10_BASE")
 
 # ============================================================
 # BINANCE (v9 style)
@@ -207,15 +189,14 @@ class EngineState:
     cooldown_until_bar: int = 0
     position: Optional[Position] = None
     close_history: List[float] = field(default_factory=list)
-    low_history: List[float] = field(default_factory=list)
 
 # ============================================================
-# ENTRY (LONG ONLY — EMA9 crosses ABOVE EMA14 + Slope Filter)
+# ENTRY (LONG ONLY — EMA9 crosses ABOVE EMA14)
 # ============================================================
 
-def base_entry_signal(closes: List[float]) -> bool:
+def base_entry_signal(closes: List[float]) -> Optional[str]:
     if len(closes) < 60:
-        return False
+        return None
 
     ema_fast_s = ema_series(closes, CFG["10_EMA_FAST"])
     ema_mid_s  = ema_series(closes, CFG["11_EMA_MID"])
@@ -225,32 +206,23 @@ def base_entry_signal(closes: List[float]) -> bool:
         (ema_fast_s[-1] > ema_mid_s[-1])
     )
 
-    if not cross_up:
-        return False
+    if cross_up:
+        return "LONG"
 
-    if CFG["60_FILTER_SLOPE_ENABLE"]:
-        bars = int(CFG["61_SLOPE_BARS"])
-        if len(ema_mid_s) < bars + 2:
-            return False
-        ema_now    = ema_mid_s[-1]
-        ema_prev_n = ema_mid_s[-1 - bars]
-        if ema_prev_n == 0:
-            return False
-        slope_pct = (ema_now - ema_prev_n) / ema_prev_n
-        if slope_pct < float(CFG["62_SLOPE_MIN_PCT"]):
-            return False
-
-    return True
+    return None
 
 # ============================================================
 # EXIT (EMA4 based + SL + TIMEOUT)
 # ============================================================
 
-def exit_option_sl(close: float, entry_price: float) -> bool:
+def exit_option_sl(close: float, entry_price: float, side: str) -> bool:
     if not CFG["40_SL_ENABLE"]:
         return False
     sl = float(CFG["41_SL_PCT"]) / 100.0
-    return close <= entry_price * (1.0 - sl)
+    if side == "LONG":
+        return close <= entry_price * (1.0 - sl)
+    else:
+        return close >= entry_price * (1.0 + sl)
 
 def exit_option_timeout(current_bar: int, entry_bar: int) -> bool:
     if not CFG["50_TIMEOUT_EXIT_ENABLE"]:
@@ -264,7 +236,7 @@ def exit_signal(state: EngineState) -> bool:
 
     close_now = state.close_history[-1]
 
-    if exit_option_sl(close_now, pos.entry_price):
+    if exit_option_sl(close_now, pos.entry_price, pos.side):
         return True
     if exit_option_timeout(state.bar, pos.entry_bar):
         return True
@@ -355,7 +327,7 @@ def engine():
 
     st = EngineState()
 
-    log.info(f"START v7_BASE (EMA9↑EMA14 / EXIT=EMA4) | symbol={symbol} interval={interval} capital={capital} lev={CFG['04_LEVERAGE']}")
+    log.info(f"START v10_BASE (EMA9↑EMA14 / EXIT=EMA4) | symbol={symbol} interval={interval} capital={capital} lev={CFG['04_LEVERAGE']}")
 
     while not STOP:
         try:
@@ -374,7 +346,6 @@ def engine():
             if not st.close_history:
                 for k in kl[:-1]:
                     st.close_history.append(float(k[4]))
-                    st.low_history.append(float(k[3]))
                 st.bar = len(st.close_history)
                 st.last_open_time = int(kl[-2][0])
                 log.info(f"COLD START: loaded {st.bar} bars")
@@ -384,21 +355,18 @@ def engine():
             st.bar += 1
 
             close = float(completed[4])
-            low   = float(completed[3])
             st.close_history.append(close)
-            st.low_history.append(low)
 
             if len(st.close_history) > 2000:
                 st.close_history = st.close_history[-2000:]
-                st.low_history   = st.low_history[-2000:]
 
             if st.position is None:
                 if st.bar < st.cooldown_until_bar:
                     continue
 
-                sig_entry = base_entry_signal(st.close_history)
+                direction = base_entry_signal(st.close_history)
 
-                if sig_entry:
+                if direction == "LONG":
                     order = place_long_entry(client, symbol, capital, lot)
                     if order:
                         st.position = Position(
@@ -413,6 +381,7 @@ def engine():
                         log.info(f"[ENTRY] LONG qty={st.position.qty} entry={st.position.entry_price} bar={st.bar}")
                     else:
                         log.error("[ENTRY_FAIL] order failed")
+
             else:
                 if st.position.entry_bar == st.bar:
                     continue
@@ -432,7 +401,7 @@ def engine():
             log.error(f"engine loop error: {e}")
             time.sleep(CFG["91_POLL_SEC"])
 
-    log.info("STOP v7_BASE")
+    log.info("STOP v10_BASE")
 
 if __name__ == "__main__":
     engine()
