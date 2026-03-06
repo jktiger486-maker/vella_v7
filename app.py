@@ -21,7 +21,7 @@ from collections import deque
 # ============================================================
 
 CFG = {
-    "01_TRADE_SYMBOL": "KITEUSDT",
+    "01_TRADE_SYMBOL": "CCUSDT",
     "02_INTERVAL": "5m",
     "03_CAPITAL_BASE_USDT": 10.0,
     "04_LEVERAGE": 1,
