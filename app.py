@@ -1,9 +1,8 @@
 # ============================================================
-# VELLA_v10_BASE — LONG ONLY (EMA9↑EMA14 / EXIT=EMA4)
-# - EXECUTION CORE: based on v9 proven trade plumbing (lotSize/qty/order/reduceOnly/closed-bar loop)
-# - ENTRY: EMA9 crosses ABOVE EMA14 (Golden Cross)
-# - EXIT: close < EMA4 (CLOSE_LT_EMA mode default)
-# - TIME AXIS: REST closed-bar only (kline[-2])
+# VELLA_BR7 — LONG ENGINE
+# ENTRY LOGIC: v10 backtest_long 100% 미러 (ARENA/E1/E2/slope/tolerance/swing)
+# EXIT LOGIC: EMA CROSS EXIT (exit_fast < exit_mid)
+# EXECUTION: v9 proven plumbing (qty str / reduceOnly / closed-bar)
 # ============================================================
 
 import os
@@ -14,53 +13,39 @@ import logging
 import requests
 from decimal import Decimal, ROUND_DOWN
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Deque
+from collections import deque
 
 # ============================================================
-# CFG (ALL CONTROL HERE)
+# CFG
 # ============================================================
-# 20250210_BASE : 완전 단순 EMA3선 교차 실험 모드
-# 20260217_LONG : EMA9↑EMA14 확정 / EXIT=EMA4 / SHORT/stack 제거
 
 CFG = {
-    # -------------------------
-    # BASIC
-    # -------------------------
-    "01_TRADE_SYMBOL": "CCUSDT",
+    "01_TRADE_SYMBOL": "KITEUSDT",
     "02_INTERVAL": "5m",
     "03_CAPITAL_BASE_USDT": 10.0,
     "04_LEVERAGE": 1,
 
-    # -------------------------
-    # ENTRY (LONG ONLY)
-    # - trigger: EMA_FAST crosses ABOVE EMA_MID
-    # -------------------------
-    "10_EMA_FAST": 9,
-    "11_EMA_MID": 14,
+    # ---- ENTRY EMA (옵티 정합) ----
+    "10_EMA_FAST": 5,
+    "11_EMA_MID": 10,
+    "12_EMA_ARENA": 30,
+    "13_TOUCH_TOLERANCE": 0.001,
+    "14_SLOPE_THRESHOLD": 0.005,
+    "15_SWING_LOOKBACK": 5,
 
-    # -------------------------
-    # ENTRY MANAGEMENT
-    # -------------------------
-    "20_ENTRY_COOLDOWN_BARS": 0,
+    "23_ENTRY2_ENABLE": True,
 
-    # -------------------------
-    # EXIT
-    # -------------------------
-    "30_EXIT_EMA": 4,
-    "31_EXIT_MODE": "CLOSE_LT_EMA",  # "CLOSE_LT_EMA" / "CROSSUNDER"
+    # ---- EXIT EMA (CROSS EXIT) ----
+    "30_EXIT_FAST_EMA": 4,
+    "31_EXIT_MID_EMA": 8,
 
-    # -------------------------
-    # EXIT OPTIONS (plug-in slots; default OFF)
-    # -------------------------
     "40_SL_ENABLE": False,
     "41_SL_PCT": 2.0,
 
     "50_TIMEOUT_EXIT_ENABLE": False,
     "51_TIMEOUT_BARS": 60,
 
-    # -------------------------
-    # ENGINE
-    # -------------------------
     "90_KLINE_LIMIT": 1500,
     "91_POLL_SEC": 7,
     "92_LOG_LEVEL": "INFO",
@@ -75,10 +60,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("VELLA_v10_BASE")
+log = logging.getLogger("VELLA_BR7_LONG")
 
 # ============================================================
-# BINANCE (v9 style)
+# BINANCE
 # ============================================================
 
 try:
@@ -94,18 +79,64 @@ BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 
 def init_client() -> "Client":
     if Client is None:
-        raise RuntimeError("python-binance missing. pip install python-binance")
+        raise RuntimeError("python-binance missing")
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
     if not api_key or not api_secret:
-        raise RuntimeError("Missing BINANCE_API_KEY / BINANCE_API_SECRET env vars.")
+        raise RuntimeError("Missing BINANCE_API_KEY / BINANCE_API_SECRET")
     return Client(api_key, api_secret)
 
 def set_leverage(client: "Client", symbol: str, leverage: int) -> None:
     try:
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
+        log.info(f"[LEVERAGE] {symbol} leverage={leverage}")
     except Exception as e:
         log.error(f"set_leverage failed: {e}")
+
+def verify_account_safety(client: "Client", symbol: str, capital_usdt: float, lot: Dict[str, Decimal]) -> bool:
+    """엔진 시작 전 계정/포지션 모드/최소 주문금액 안전 확인."""
+    try:
+        # 1) 포지션 모드: ONE_WAY(dualSidePosition=false) 확인
+        pos_mode = client.futures_get_position_mode()
+        if pos_mode.get("dualSidePosition", True):
+            log.error("[SAFETY] HEDGE MODE 감지. ONE_WAY 모드로 변경 후 재시작하세요.")
+            return False
+
+        # 2) 마진 모드: ISOLATED 확인 (futures_position_information 기준)
+        pos_info = client.futures_position_information(symbol=symbol)
+        margin_type_ok = False
+        for p in pos_info:
+            if p.get("symbol") == symbol:
+                margin_type = p.get("marginType", "").upper()
+                if margin_type != "ISOLATED":
+                    log.error(f"[SAFETY] {symbol} 마진 모드가 ISOLATED가 아닙니다: {margin_type}. 변경 후 재시작하세요.")
+                    return False
+                margin_type_ok = True
+                break
+        if not margin_type_ok:
+            log.error(f"[SAFETY] {symbol} position_information에서 marginType 확인 불가.")
+            return False
+
+        # 3) 최소 주문금액(MIN_NOTIONAL) 확인
+        info = client.futures_exchange_info()
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "MIN_NOTIONAL":
+                        min_notional = float(f["notional"])
+                        notional = float(capital_usdt) * float(CFG["04_LEVERAGE"])
+                        if notional < min_notional:
+                            log.error(f"[SAFETY] 주문금액 {notional:.2f} USDT < MIN_NOTIONAL {min_notional:.2f} USDT. capital 또는 leverage를 높이세요.")
+                            return False
+                        break
+                break
+
+        log.info("[SAFETY] ONE_WAY ✅ | ISOLATED ✅ | MIN_NOTIONAL ✅")
+        return True
+
+    except Exception as e:
+        log.error(f"verify_account_safety: {e}")
+        return False
 
 def fetch_klines_futures(symbol: str, interval: str, limit: int) -> Optional[List[Any]]:
     try:
@@ -129,47 +160,94 @@ def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, De
                     if f["filterType"] == "LOT_SIZE":
                         return {
                             "stepSize": Decimal(f["stepSize"]),
-                            "minQty": Decimal(f["minQty"]),
-                            "maxQty": Decimal(f["maxQty"]),
+                            "minQty":   Decimal(f["minQty"]),
+                            "maxQty":   Decimal(f["maxQty"]),
                         }
         return None
     except Exception as e:
         log.error(f"get_futures_lot_size: {e}")
         return None
 
-def calculate_quantity(qty_raw: float, lot: Dict[str, Decimal]) -> Optional[float]:
+# ============================================================
+# QTY (str 통일)
+# ============================================================
+
+def calculate_quantity(qty_raw, lot: Dict[str, Decimal]) -> Optional[str]:
+    """ENTRY 전용: float qty_raw → str"""
     if lot is None:
         return None
     qty_decimal = Decimal(str(qty_raw))
     step = lot["stepSize"]
-    qty = (qty_decimal / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
+    qty  = (qty_decimal / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
     if qty < lot["minQty"]:
+        log.error(f"qty {qty} < minQty {lot['minQty']}")
         return None
     if qty > lot["maxQty"]:
         qty = lot["maxQty"]
     precision = abs(step.as_tuple().exponent)
-    return float(qty.quantize(Decimal(10) ** -precision))
+    return f"{qty:.{precision}f}"
+
+def normalize_qty_str(qty_str: str, lot: Dict[str, Decimal]) -> Optional[str]:
+    """EXIT 전용: str qty → stepSize 기준 재정렬 후 str 반환"""
+    if lot is None:
+        return None
+    qty_decimal = Decimal(qty_str)
+    step = lot["stepSize"]
+    qty  = (qty_decimal / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
+    if qty < lot["minQty"]:
+        log.error(f"exit qty {qty} < minQty {lot['minQty']}")
+        return None
+    if qty > lot["maxQty"]:
+        qty = lot["maxQty"]
+    precision = abs(step.as_tuple().exponent)
+    return f"{qty:.{precision}f}"
 
 # ============================================================
-# INDICATORS
+# EMA — incremental (옵티 동일 방식)
 # ============================================================
 
-def ema_series(values: List[float], period: int) -> List[float]:
-    if not values:
-        return []
-    if len(values) < period:
-        return [values[0]] * len(values)
-    k = 2 / (period + 1)
-    out = [values[0]] * len(values)
-    sma = sum(values[:period]) / period
-    out[period - 1] = sma
-    prev = sma
-    for i in range(period, len(values)):
-        prev = (values[i] * k) + (prev * (1 - k))
-        out[i] = prev
-    for i in range(period - 1):
-        out[i] = out[period - 1]
-    return out
+class IncrementalEMA:
+    """
+    옵티(ema_series)와 동일한 EMA.
+    부트스트랩: 첫 period 개 close의 단순 평균으로 seed.
+    이후: prev * (1-k) + price * k
+    """
+    def __init__(self, period: int):
+        self.period  = period
+        self.k       = 2.0 / (period + 1)
+        self.value   = None
+        self.ready   = False
+        self._buf: List[float] = []
+        self._history: Deque[float] = deque()
+
+    def update(self, price: float) -> None:
+        if not self.ready:
+            self._buf.append(price)
+            if len(self._buf) >= self.period:
+                self.value = sum(self._buf) / len(self._buf)
+                self.ready = True
+                self._buf  = []
+        else:
+            self.value = price * self.k + self.value * (1.0 - self.k)
+        if self.ready:
+            self._history.append(self.value)
+
+    def get(self) -> Optional[float]:
+        return self.value if self.ready else None
+
+    def get_prev(self) -> Optional[float]:
+        if len(self._history) >= 2:
+            return self._history[-2]
+        return None
+
+    def get_lookback(self, n: int) -> Optional[float]:
+        if len(self._history) > n:
+            return self._history[-(n + 1)]
+        return None
+
+    def trim_history(self, maxlen: int = 2100) -> None:
+        while len(self._history) > maxlen:
+            self._history.popleft()
 
 # ============================================================
 # STATE
@@ -177,124 +255,185 @@ def ema_series(values: List[float], period: int) -> List[float]:
 
 @dataclass
 class Position:
-    side: str
+    side:        str
     entry_price: float
-    qty: float
-    entry_bar: int
+    qty:         str
+    entry_bar:   int
+    entry_type:  str = "E1"
 
 @dataclass
 class EngineState:
-    bar: int = 0
-    last_open_time: Optional[int] = None
-    cooldown_until_bar: int = 0
-    position: Optional[Position] = None
-    close_history: List[float] = field(default_factory=list)
+    bar:            int            = 0
+    last_open_time: Optional[int]  = None
+    position:       Optional[Position] = None
+
+    close_history: Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    high_history:  Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    low_history:   Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+
+    ema_fast:      IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["10_EMA_FAST"]))
+    ema_mid:       IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["11_EMA_MID"]))
+    ema_arena:     IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["12_EMA_ARENA"]))
+    ema_exit_fast: IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["30_EXIT_FAST_EMA"]))
+    ema_exit_mid:  IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["31_EXIT_MID_EMA"]))
+
+    prev_arena_state: Optional[bool] = None
 
 # ============================================================
-# ENTRY (LONG ONLY — EMA9 crosses ABOVE EMA14)
+# WARMUP
 # ============================================================
 
-def base_entry_signal(closes: List[float]) -> Optional[str]:
-    if len(closes) < 60:
-        return None
+def _warmup_done(st: EngineState) -> bool:
+    swing  = int(CFG["15_SWING_LOOKBACK"])
+    needed = max(
+        CFG["10_EMA_FAST"],
+        CFG["11_EMA_MID"],
+        CFG["12_EMA_ARENA"],
+        CFG["30_EXIT_FAST_EMA"],
+        CFG["31_EXIT_MID_EMA"],
+        swing + 2,
+        62,  # 옵티 기준 안전 warmup 바닥값
+    )
+    return st.bar >= needed
 
-    ema_fast_s = ema_series(closes, CFG["10_EMA_FAST"])
-    ema_mid_s  = ema_series(closes, CFG["11_EMA_MID"])
+# ============================================================
+# ENTRY SIGNALS (v10 backtest_long 미러)
+# ============================================================
 
-    cross_up = (
-        (ema_fast_s[-2] <= ema_mid_s[-2]) and
-        (ema_fast_s[-1] > ema_mid_s[-1])
+def long_entry_signals(st: EngineState) -> str:
+    """반환: 'E1' / 'E2' / ''"""
+    if not _warmup_done(st):
+        return ""
+
+    fast  = st.ema_fast
+    mid   = st.ema_mid
+    arena = st.ema_arena
+
+    if not (fast.ready and mid.ready and arena.ready):
+        return ""
+
+    fast_now  = fast.get()
+    fast_prev = fast.get_prev()
+    mid_now   = mid.get()
+    mid_prev  = mid.get_prev()
+    arena_now = arena.get()
+
+    if fast_prev is None or mid_prev is None:
+        return ""
+
+    # LONG ARENA: fast > arena AND mid > arena
+    long_arena = (fast_now > arena_now) and (mid_now > arena_now)
+    if not long_arena:
+        return ""
+
+    # Slope: ema_fast[-1] vs ema_fast[-(lookback+1)]
+    swing_lookback  = int(CFG["15_SWING_LOOKBACK"])
+    slope_threshold = float(CFG["14_SLOPE_THRESHOLD"])
+    ref = fast.get_lookback(swing_lookback)
+    if ref is None or ref == 0:
+        return ""
+    slope_val = (fast_now - ref) / ref
+    slope_ok  = slope_val >= slope_threshold
+    if not slope_ok:
+        return ""
+
+    # E1: Golden cross (완료봉 기준)
+    e1_signal = (fast_prev <= mid_prev) and (fast_now > mid_now)
+
+    # E2: 아래꼬리 터치 → 실패 마감
+    tolerance = float(CFG["13_TOUCH_TOLERANCE"])
+    if len(st.low_history) < 2 or len(st.close_history) < 1:
+        return ""
+    pullback  = st.low_history[-2] <= fast_prev * (1.0 + tolerance)
+    reentry   = st.close_history[-1] > fast_now
+    e2_signal = pullback and reentry
+
+    log.debug(
+        f"[ENTRY_CHECK] arena={long_arena} fast_slope={slope_val:.6f} e1={e1_signal} e2={e2_signal}"
     )
 
-    if cross_up:
-        return "LONG"
-
-    return None
+    if e1_signal:
+        return "E1"
+    if CFG["23_ENTRY2_ENABLE"] and e2_signal:
+        return "E2"
+    return ""
 
 # ============================================================
-# EXIT (EMA4 based + SL + TIMEOUT)
+# EXIT
 # ============================================================
 
-def exit_option_sl(close: float, entry_price: float, side: str) -> bool:
-    if not CFG["40_SL_ENABLE"]:
-        return False
-    sl = float(CFG["41_SL_PCT"]) / 100.0
-    if side == "LONG":
-        return close <= entry_price * (1.0 - sl)
-    else:
-        return close >= entry_price * (1.0 + sl)
-
-def exit_option_timeout(current_bar: int, entry_bar: int) -> bool:
-    if not CFG["50_TIMEOUT_EXIT_ENABLE"]:
-        return False
-    return (current_bar - entry_bar) >= int(CFG["51_TIMEOUT_BARS"])
-
-def exit_signal(state: EngineState) -> bool:
-    pos = state.position
+def exit_signal(st: EngineState) -> bool:
+    pos = st.position
     if pos is None:
         return False
 
-    close_now = state.close_history[-1]
+    close = st.close_history[-1]
 
-    if exit_option_sl(close_now, pos.entry_price, pos.side):
-        return True
-    if exit_option_timeout(state.bar, pos.entry_bar):
-        return True
-
-    ema_exit_s   = ema_series(state.close_history, int(CFG["30_EXIT_EMA"]))
-    ema_exit_now = ema_exit_s[-1]
-    mode         = CFG["31_EXIT_MODE"]
-
-    if mode == "CLOSE_LT_EMA":
-        if close_now < ema_exit_now:
+    if CFG["40_SL_ENABLE"]:
+        sl = float(CFG["41_SL_PCT"]) / 100.0
+        if close <= pos.entry_price * (1.0 - sl):
+            log.info(f"[EXIT_SL] close={close} <= SL={pos.entry_price * (1.0 - sl)}")
             return True
 
-    elif mode == "CROSSUNDER":
-        close_prev    = state.close_history[-2]
-        ema_exit_prev = ema_exit_s[-2]
-        crossunder = (close_prev >= ema_exit_prev) and (close_now < ema_exit_now)
-        if crossunder:
-            return True
+    if CFG["50_TIMEOUT_EXIT_ENABLE"]:
+        if pos.entry_type != "SYNC":
+            if (st.bar - pos.entry_bar) >= int(CFG["51_TIMEOUT_BARS"]):
+                log.info(f"[EXIT_TIMEOUT] bars={st.bar - pos.entry_bar}")
+                return True
 
+    ef = st.ema_exit_fast.get()
+    em = st.ema_exit_mid.get()
+    if ef is None or em is None:
+        return False
+    if ef < em:
+        log.info(f"[EXIT_EMA_CROSS] ef={ef:.8f} em={em:.8f} close={close:.8f}")
+        return True
     return False
 
 # ============================================================
-# EXECUTION (v9-style order plumbing)
+# EXECUTION
 # ============================================================
 
 def place_long_entry(client: "Client", symbol: str, capital_usdt: float, lot: Dict[str, Decimal]) -> Optional[Dict[str, Any]]:
     try:
-        ticker = client.futures_symbol_ticker(symbol=symbol)
-        price = float(ticker["price"])
+        ticker   = client.futures_symbol_ticker(symbol=symbol)
+        price    = float(ticker["price"])
         leverage = int(CFG["04_LEVERAGE"])
         notional = float(capital_usdt) * float(leverage)
-        qty_raw = notional / price
-        qty = calculate_quantity(qty_raw, lot)
-        if qty is None:
-            log.error("entry: qty calculation failed (minQty/stepSize)")
+        qty_raw  = notional / price
+        qty_str  = calculate_quantity(qty_raw, lot)
+        if qty_str is None:
+            log.error("entry: qty calculation failed")
             return None
-        client.futures_create_order(
+        order = client.futures_create_order(
             symbol=symbol,
             side=SIDE_BUY,
             type=ORDER_TYPE_MARKET,
-            quantity=qty,
+            quantity=qty_str,
         )
-        return {"entry_price": price, "qty": qty}
+        # 실제 체결 평균가 조회 (avgPrice > 0이면 사용, 아니면 ticker 근사값 fallback)
+        try:
+            filled = client.futures_get_order(symbol=symbol, orderId=order["orderId"])
+            avg_price = float(filled.get("avgPrice", 0))
+            entry_price = avg_price if avg_price > 0 else price
+        except Exception:
+            entry_price = price  # fallback: 주문 직전 ticker
+        return {"entry_price": entry_price, "qty": qty_str}
     except Exception as e:
         log.error(f"place_long_entry: {e}")
         return None
 
-def place_long_exit(client: "Client", symbol: str, qty: float, lot: Dict[str, Decimal]) -> bool:
+def place_long_exit(client: "Client", symbol: str, qty: str, lot: Dict[str, Decimal]) -> bool:
     try:
-        qty_rounded = calculate_quantity(qty, lot)
-        if qty_rounded is None:
-            log.error("exit: qty too small (minQty) — cannot close")
+        qty2 = normalize_qty_str(qty, lot)
+        if qty2 is None:
+            log.error("exit: qty too small")
             return False
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_SELL,
             type=ORDER_TYPE_MARKET,
-            quantity=qty_rounded,
+            quantity=qty2,
             reduceOnly=True
         )
         return True
@@ -303,7 +442,7 @@ def place_long_exit(client: "Client", symbol: str, qty: float, lot: Dict[str, De
         return False
 
 # ============================================================
-# ENGINE LOOP (closed bar only)
+# ENGINE LOOP
 # ============================================================
 
 STOP = False
@@ -313,11 +452,28 @@ def _sig_handler(_sig, _frame):
 signal.signal(signal.SIGINT, _sig_handler)
 signal.signal(signal.SIGTERM, _sig_handler)
 
+def _apply_bar(st: EngineState, close: float, high: float, low: float) -> None:
+    st.close_history.append(close)
+    st.high_history.append(high)
+    st.low_history.append(low)
+
+    st.ema_fast.update(close)
+    st.ema_mid.update(close)
+    st.ema_arena.update(close)
+    st.ema_exit_fast.update(close)
+    st.ema_exit_mid.update(close)
+
+    st.ema_fast.trim_history()
+    st.ema_mid.trim_history()
+    st.ema_arena.trim_history()
+    st.ema_exit_fast.trim_history()
+    st.ema_exit_mid.trim_history()
+
 def engine():
-    client = init_client()
-    symbol = CFG["01_TRADE_SYMBOL"]
+    client   = init_client()
+    symbol   = CFG["01_TRADE_SYMBOL"]
     interval = CFG["02_INTERVAL"]
-    capital = float(CFG["03_CAPITAL_BASE_USDT"])
+    capital  = float(CFG["03_CAPITAL_BASE_USDT"])
 
     set_leverage(client, symbol, int(CFG["04_LEVERAGE"]))
 
@@ -325,9 +481,39 @@ def engine():
     if lot is None:
         raise RuntimeError("lot_size retrieval failed")
 
+    if not verify_account_safety(client, symbol, capital, lot):
+        raise RuntimeError("계정 안전 확인 실패. 로그 확인 후 재시작하세요.")
+
     st = EngineState()
 
-    log.info(f"START v10_BASE (EMA9↑EMA14 / EXIT=EMA4) | symbol={symbol} interval={interval} capital={capital} lev={CFG['04_LEVERAGE']}")
+    # SYNC 기존 LONG 포지션
+    try:
+        positions = client.futures_position_information(symbol=symbol)
+        for pos in positions:
+            if pos['symbol'] == symbol:
+                position_amt = float(pos['positionAmt'])
+                if position_amt > 0:
+                    sync_qty_str = calculate_quantity(abs(position_amt), lot)
+                    if sync_qty_str is None:
+                        log.error("[SYNC] qty calculation failed, skipping sync")
+                    else:
+                        st.position = Position(
+                            side="LONG",
+                            entry_price=float(pos['entryPrice']),
+                            qty=sync_qty_str,
+                            entry_bar=st.bar,
+                            entry_type="SYNC"
+                        )
+                        log.info(f"[SYNC] Existing LONG position detected: qty={st.position.qty} entry={st.position.entry_price}")
+                    break
+    except Exception as e:
+        log.error(f"position sync failed: {e}")
+
+    log.info(
+        f"START BR7 LONG | symbol={symbol} interval={interval} capital={capital} lev={CFG['04_LEVERAGE']} "
+        f"| ENTRY_EMA=({CFG['10_EMA_FAST']},{CFG['11_EMA_MID']},{CFG['12_EMA_ARENA']}) "
+        f"| EXIT_EMA=({CFG['30_EXIT_FAST_EMA']},{CFG['31_EXIT_MID_EMA']})"
+    )
 
     while not STOP:
         try:
@@ -343,65 +529,68 @@ def engine():
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
 
+            # 최초 부트스트랩
             if not st.close_history:
                 for k in kl[:-1]:
-                    st.close_history.append(float(k[4]))
+                    _apply_bar(st, float(k[4]), float(k[2]), float(k[3]))
                 st.bar = len(st.close_history)
                 st.last_open_time = int(kl[-2][0])
-                log.info(f"COLD START: loaded {st.bar} bars")
+                log.info(f"[BOOT] {st.bar} bars loaded, EMA warm-up complete={_warmup_done(st)}")
                 continue
 
             st.last_open_time = open_time
             st.bar += 1
 
-            close = float(completed[4])
-            st.close_history.append(close)
+            _apply_bar(st, float(completed[4]), float(completed[2]), float(completed[3]))
 
-            if len(st.close_history) > 2000:
-                st.close_history = st.close_history[-2000:]
+            # ARENA 상태 변화 로그
+            if st.ema_fast.ready and st.ema_arena.ready:
+                long_arena_now = (
+                    (st.ema_fast.get() > st.ema_arena.get()) and
+                    (st.ema_mid.get() > st.ema_arena.get())
+                )
+                if long_arena_now != st.prev_arena_state:
+                    if long_arena_now:
+                        log.info("[ARENA] fast>arena and mid>arena 통과")
+                    else:
+                        log.info("[ARENA] arena 차단 (need fast>arena and mid>arena)")
+                    st.prev_arena_state = long_arena_now
 
             if st.position is None:
-                if st.bar < st.cooldown_until_bar:
-                    continue
+                entry_type = long_entry_signals(st)
 
-                direction = base_entry_signal(st.close_history)
-
-                if direction == "LONG":
+                if entry_type:
                     order = place_long_entry(client, symbol, capital, lot)
                     if order:
                         st.position = Position(
                             side="LONG",
                             entry_price=float(order["entry_price"]),
-                            qty=float(order["qty"]),
+                            qty=order["qty"],
                             entry_bar=st.bar,
+                            entry_type=entry_type
                         )
-                        cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
-                        if cd > 0:
-                            st.cooldown_until_bar = st.bar + cd
-                        log.info(f"[ENTRY] LONG qty={st.position.qty} entry={st.position.entry_price} bar={st.bar}")
+                        log.info(f"[ENTRY] LONG type={entry_type} qty={st.position.qty} entry={st.position.entry_price} bar={st.bar}")
                     else:
                         log.error("[ENTRY_FAIL] order failed")
-
             else:
+                # same-bar exit 차단
                 if st.position.entry_bar == st.bar:
                     continue
 
                 if exit_signal(st):
                     ok = place_long_exit(client, symbol, st.position.qty, lot)
                     if ok:
-                        log.info(f"[EXIT] LONG close={close} entry={st.position.entry_price} bar={st.bar}")
+                        log.info(f"[EXIT] LONG type={st.position.entry_type} close={st.close_history[-1]} entry={st.position.entry_price} bar={st.bar}")
                         st.position = None
-                        cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
-                        if cd > 0:
-                            st.cooldown_until_bar = st.bar + cd
+                        continue  # 청산봉 즉시 재진입 금지
                     else:
-                        log.error("[EXIT_FAIL] order failed (kept position)")
+                        log.error("[EXIT_FAIL] order failed (position kept)")
 
         except Exception as e:
             log.error(f"engine loop error: {e}")
             time.sleep(CFG["91_POLL_SEC"])
 
-    log.info("STOP v10_BASE")
+    log.info("STOP BR7 LONG")
 
 if __name__ == "__main__":
     engine()
