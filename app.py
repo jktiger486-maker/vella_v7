@@ -31,7 +31,7 @@ CFG = {
     "11_EMA_MID": 10,
     "12_EMA_ARENA": 30,
     "13_TOUCH_TOLERANCE": 0.001,
-    "14_SLOPE_THRESHOLD": 0.005,
+    "14_SLOPE_THRESHOLD": 0.001,  # [수정] 0.005 → 0.0005 (진입 과도 억제 방지)
     "15_SWING_LOOKBACK": 5,
 
     "23_ENTRY2_ENABLE": True,
@@ -94,7 +94,7 @@ def set_leverage(client: "Client", symbol: str, leverage: int) -> None:
         log.error(f"set_leverage failed: {e}")
 
 def verify_account_safety(client: "Client", symbol: str, capital_usdt: float, lot: Dict[str, Decimal]) -> bool:
-    """엔진 시작 전 계정/포지션 모드/최소 주문금액 안전 확인."""
+    """엔진 시작 전 ONE_WAY / MIN_NOTIONAL 안전 확인. (marginType 검사 제거)"""
     try:
         # 1) 포지션 모드: ONE_WAY(dualSidePosition=false) 확인
         pos_mode = client.futures_get_position_mode()
@@ -102,22 +102,7 @@ def verify_account_safety(client: "Client", symbol: str, capital_usdt: float, lo
             log.error("[SAFETY] HEDGE MODE 감지. ONE_WAY 모드로 변경 후 재시작하세요.")
             return False
 
-        # 2) 마진 모드: ISOLATED 확인 (futures_position_information 기준)
-        pos_info = client.futures_position_information(symbol=symbol)
-        margin_type_ok = False
-        for p in pos_info:
-            if p.get("symbol") == symbol:
-                margin_type = p.get("marginType", "").upper()
-                if margin_type != "ISOLATED":
-                    log.error(f"[SAFETY] {symbol} 마진 모드가 ISOLATED가 아닙니다: {margin_type}. 변경 후 재시작하세요.")
-                    return False
-                margin_type_ok = True
-                break
-        if not margin_type_ok:
-            log.error(f"[SAFETY] {symbol} position_information에서 marginType 확인 불가.")
-            return False
-
-        # 3) 최소 주문금액(MIN_NOTIONAL) 확인
+        # 2) 최소 주문금액(MIN_NOTIONAL) 확인
         info = client.futures_exchange_info()
         for s in info["symbols"]:
             if s["symbol"] == symbol:
@@ -131,7 +116,7 @@ def verify_account_safety(client: "Client", symbol: str, capital_usdt: float, lo
                         break
                 break
 
-        log.info("[SAFETY] ONE_WAY ✅ | ISOLATED ✅ | MIN_NOTIONAL ✅")
+        log.info("[SAFETY] ONE_WAY ✅ | MIN_NOTIONAL ✅")
         return True
 
     except Exception as e:
