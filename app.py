@@ -31,7 +31,7 @@ CFG = {
     "11_EMA_MID": 10,
     "12_EMA_ARENA": 30,
     "13_TOUCH_TOLERANCE": 0.001,
-    "14_SLOPE_THRESHOLD": 0.001,  # [수정] 0.005 → 0.0005 (진입 과도 억제 방지)
+    "14_SLOPE_THRESHOLD": 0.0005,  # 실전 진입 수가 과도하게 줄면 0.0005 튜닝 후보
     "15_SWING_LOOKBACK": 5,
 
     "23_ENTRY2_ENABLE": True,
@@ -94,15 +94,12 @@ def set_leverage(client: "Client", symbol: str, leverage: int) -> None:
         log.error(f"set_leverage failed: {e}")
 
 def verify_account_safety(client: "Client", symbol: str, capital_usdt: float, lot: Dict[str, Decimal]) -> bool:
-    """엔진 시작 전 ONE_WAY / MIN_NOTIONAL 안전 확인. (marginType 검사 제거)"""
     try:
-        # 1) 포지션 모드: ONE_WAY(dualSidePosition=false) 확인
         pos_mode = client.futures_get_position_mode()
         if pos_mode.get("dualSidePosition", True):
             log.error("[SAFETY] HEDGE MODE 감지. ONE_WAY 모드로 변경 후 재시작하세요.")
             return False
 
-        # 2) 최소 주문금액(MIN_NOTIONAL) 확인
         info = client.futures_exchange_info()
         for s in info["symbols"]:
             if s["symbol"] == symbol:
@@ -111,7 +108,7 @@ def verify_account_safety(client: "Client", symbol: str, capital_usdt: float, lo
                         min_notional = float(f["notional"])
                         notional = float(capital_usdt) * float(CFG["04_LEVERAGE"])
                         if notional < min_notional:
-                            log.error(f"[SAFETY] 주문금액 {notional:.2f} USDT < MIN_NOTIONAL {min_notional:.2f} USDT. capital 또는 leverage를 높이세요.")
+                            log.error(f"[SAFETY] 주문금액 {notional:.2f} USDT < MIN_NOTIONAL {min_notional:.2f} USDT.")
                             return False
                         break
                 break
@@ -158,7 +155,6 @@ def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, De
 # ============================================================
 
 def calculate_quantity(qty_raw, lot: Dict[str, Decimal]) -> Optional[str]:
-    """ENTRY 전용: float qty_raw → str"""
     if lot is None:
         return None
     qty_decimal = Decimal(str(qty_raw))
@@ -173,7 +169,6 @@ def calculate_quantity(qty_raw, lot: Dict[str, Decimal]) -> Optional[str]:
     return f"{qty:.{precision}f}"
 
 def normalize_qty_str(qty_str: str, lot: Dict[str, Decimal]) -> Optional[str]:
-    """EXIT 전용: str qty → stepSize 기준 재정렬 후 str 반환"""
     if lot is None:
         return None
     qty_decimal = Decimal(qty_str)
@@ -192,11 +187,6 @@ def normalize_qty_str(qty_str: str, lot: Dict[str, Decimal]) -> Optional[str]:
 # ============================================================
 
 class IncrementalEMA:
-    """
-    옵티(ema_series)와 동일한 EMA.
-    부트스트랩: 첫 period 개 close의 단순 평균으로 seed.
-    이후: prev * (1-k) + price * k
-    """
     def __init__(self, period: int):
         self.period  = period
         self.k       = 2.0 / (period + 1)
@@ -277,12 +267,12 @@ def _warmup_done(st: EngineState) -> bool:
         CFG["30_EXIT_FAST_EMA"],
         CFG["31_EXIT_MID_EMA"],
         swing + 2,
-        62,  # 옵티 기준 안전 warmup 바닥값
+        62,
     )
     return st.bar >= needed
 
 # ============================================================
-# ENTRY SIGNALS (v10 backtest_long 미러)
+# ENTRY SIGNALS
 # ============================================================
 
 def long_entry_signals(st: EngineState) -> str:
@@ -306,35 +296,45 @@ def long_entry_signals(st: EngineState) -> str:
     if fast_prev is None or mid_prev is None:
         return ""
 
-    # LONG ARENA: fast > arena AND mid > arena
-    long_arena = (fast_now > arena_now) and (mid_now > arena_now)
+    # 공통 게이트: 종가 > EMA30 가 1차, EMA5/EMA10 > EMA30 가 2차
+    close_now  = st.close_history[-1]
+    long_arena = (close_now > arena_now) and (fast_now > arena_now) and (mid_now > arena_now)
     if not long_arena:
+        log.debug(f"[ARENA_BLOCK] close={close_now:.8f} fast={fast_now:.8f} mid={mid_now:.8f} arena={arena_now:.8f}")
         return ""
 
-    # Slope: ema_fast[-1] vs ema_fast[-(lookback+1)]
+    # Slope
     swing_lookback  = int(CFG["15_SWING_LOOKBACK"])
     slope_threshold = float(CFG["14_SLOPE_THRESHOLD"])
     ref = fast.get_lookback(swing_lookback)
     if ref is None or ref == 0:
         return ""
     slope_val = (fast_now - ref) / ref
-    slope_ok  = slope_val >= slope_threshold
-    if not slope_ok:
+    if slope_val < slope_threshold:
         return ""
 
-    # E1: Golden cross (완료봉 기준)
+    # E1: Golden cross — 변경 없음
     e1_signal = (fast_prev <= mid_prev) and (fast_now > mid_now)
 
-    # E2: 아래꼬리 터치 → 실패 마감
+    # E2: 눌림 후 재상승
+    # [수정] 직전 캔들 종가도 EMA30 위였는지 추가 확인 → V자 가짜 반등 오진 방지
     tolerance = float(CFG["13_TOUCH_TOLERANCE"])
-    if len(st.low_history) < 2 or len(st.close_history) < 1:
+    if len(st.low_history) < 2 or len(st.close_history) < 2:
         return ""
-    pullback  = st.low_history[-2] <= fast_prev * (1.0 + tolerance)
-    reentry   = st.close_history[-1] > fast_now
-    e2_signal = pullback and reentry
+
+    arena_prev = arena.get_prev()
+    if arena_prev is None:
+        return ""
+
+    pullback              = st.low_history[-2] <= fast_prev * (1.0 + tolerance)
+    reentry               = st.close_history[-1] > fast_now
+    prev_close_above_arena = st.close_history[-2] > arena_prev  # [수정] 직전 종가 EMA30 위 확인
+    e2_signal             = pullback and reentry and prev_close_above_arena
 
     log.debug(
-        f"[ENTRY_CHECK] arena={long_arena} fast_slope={slope_val:.6f} e1={e1_signal} e2={e2_signal}"
+        f"[ENTRY_CHECK] close={close_now:.8f} arena={arena_now:.8f} long_arena={long_arena} "
+        f"slope={slope_val:.6f} e1={e1_signal} e2={e2_signal} "
+        f"prev_close_above_arena={prev_close_above_arena}"
     )
 
     if e1_signal:
@@ -396,13 +396,12 @@ def place_long_entry(client: "Client", symbol: str, capital_usdt: float, lot: Di
             type=ORDER_TYPE_MARKET,
             quantity=qty_str,
         )
-        # 실제 체결 평균가 조회 (avgPrice > 0이면 사용, 아니면 ticker 근사값 fallback)
         try:
             filled = client.futures_get_order(symbol=symbol, orderId=order["orderId"])
             avg_price = float(filled.get("avgPrice", 0))
             entry_price = avg_price if avg_price > 0 else price
         except Exception:
-            entry_price = price  # fallback: 주문 직전 ticker
+            entry_price = price
         return {"entry_price": entry_price, "qty": qty_str}
     except Exception as e:
         log.error(f"place_long_entry: {e}")
@@ -471,7 +470,6 @@ def engine():
 
     st = EngineState()
 
-    # SYNC 기존 LONG 포지션
     try:
         positions = client.futures_position_information(symbol=symbol)
         for pos in positions:
@@ -514,7 +512,6 @@ def engine():
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
 
-            # 최초 부트스트랩
             if not st.close_history:
                 for k in kl[:-1]:
                     _apply_bar(st, float(k[4]), float(k[2]), float(k[3]))
@@ -528,17 +525,19 @@ def engine():
 
             _apply_bar(st, float(completed[4]), float(completed[2]), float(completed[3]))
 
-            # ARENA 상태 변화 로그
             if st.ema_fast.ready and st.ema_arena.ready:
+                close_now      = st.close_history[-1]
+                arena_now      = st.ema_arena.get()
                 long_arena_now = (
-                    (st.ema_fast.get() > st.ema_arena.get()) and
-                    (st.ema_mid.get() > st.ema_arena.get())
+                    (close_now > arena_now) and
+                    (st.ema_fast.get() > arena_now) and
+                    (st.ema_mid.get() > arena_now)
                 )
                 if long_arena_now != st.prev_arena_state:
                     if long_arena_now:
-                        log.info("[ARENA] fast>arena and mid>arena 통과")
+                        log.info(f"[ARENA] 통과 close={close_now:.8f} > arena={arena_now:.8f}")
                     else:
-                        log.info("[ARENA] arena 차단 (need fast>arena and mid>arena)")
+                        log.info(f"[ARENA] 차단 close={close_now:.8f} arena={arena_now:.8f}")
                     st.prev_arena_state = long_arena_now
 
             if st.position is None:
@@ -558,7 +557,6 @@ def engine():
                     else:
                         log.error("[ENTRY_FAIL] order failed")
             else:
-                # same-bar exit 차단
                 if st.position.entry_bar == st.bar:
                     continue
 
@@ -567,7 +565,7 @@ def engine():
                     if ok:
                         log.info(f"[EXIT] LONG type={st.position.entry_type} close={st.close_history[-1]} entry={st.position.entry_price} bar={st.bar}")
                         st.position = None
-                        continue  # 청산봉 즉시 재진입 금지
+                        continue
                     else:
                         log.error("[EXIT_FAIL] order failed (position kept)")
 
