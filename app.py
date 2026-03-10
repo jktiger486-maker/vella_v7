@@ -24,7 +24,7 @@ CFG = {
     # -------------------------
     # BASIC
     # -------------------------
-    "01_TRADE_SYMBOL":          "DOGEUSDT",
+    "01_TRADE_SYMBOL":          "BNBUSDT",
     "02_INTERVAL":              "5m",
     "02b_HTF_INTERVAL":         "15m",
     "03_CAPITAL_BASE_USDT":     10.0,
