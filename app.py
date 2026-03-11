@@ -76,8 +76,8 @@ CFG = {
     # -------------------------
     # SL / TIMEOUT
     # -------------------------
-    "40_SL_ENABLE":             False,
-    "41_SL_PCT":                1.2,
+    "40_SL_ENABLE":             True,
+    "41_SL_PCT":                1.1,
     "50_TIMEOUT_EXIT_ENABLE":   False,
     "51_TIMEOUT_BARS":          60,
 
