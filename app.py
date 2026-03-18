@@ -69,7 +69,7 @@ CFG = {
     "31_EXIT_MID_EMA":          9,
 
     # -------------------------
-    # EXIT THRESHOLD (15분봉 EMA 간격을 이용 EXIT을 “허용”하는 스위치)
+    # EXIT THRESHOLD (15분봉 EMA 간격을 이용 EXIT을 "허용"하는 스위치)
     # -------------------------
     "70_SHORT_EXIT_THRESHOLD_PCT": 0.003,
     "71_LONG_EXIT_THRESHOLD_PCT":  0.003,
@@ -501,7 +501,8 @@ def check_15m_exit_ready(st: EngineState) -> None:
         return
 
     if st.position.side == "SHORT" and not st.short_exit_ready:
-        spread = (f - m) / m
+        # SHORT 과열: 15m EMA_FAST가 EMA_MID 아래로 충분히 벌어진 상태
+        spread = (m - f) / m
         if spread > float(CFG["70_SHORT_EXIT_THRESHOLD_PCT"]):
             st.short_exit_ready     = True
             st.short_exit_ready_bar = st.bar
@@ -511,7 +512,8 @@ def check_15m_exit_ready(st: EngineState) -> None:
             )
 
     if st.position.side == "LONG" and not st.long_exit_ready:
-        spread = (m - f) / m
+        # LONG 과열: 15m EMA_FAST가 EMA_MID 위로 충분히 벌어진 상태
+        spread = (f - m) / m
         if spread > float(CFG["71_LONG_EXIT_THRESHOLD_PCT"]):
             st.long_exit_ready     = True
             st.long_exit_ready_bar = st.bar
@@ -525,9 +527,11 @@ def check_15m_exit_ready(st: EngineState) -> None:
         rdy  = st.short_exit_ready if side == "SHORT" else st.long_exit_ready
         rbar = st.short_exit_ready_bar if side == "SHORT" else st.long_exit_ready_bar
         thr  = CFG["70_SHORT_EXIT_THRESHOLD_PCT"] if side == "SHORT" else CFG["71_LONG_EXIT_THRESHOLD_PCT"]
+        # spread 방향도 수정된 공식 기준으로 출력
+        spread_debug = (m - f) / m if side == "SHORT" else (f - m) / m
         log.debug(
             f"[EXIT_READY_STATUS] side={side} ready={rdy} bar={st.bar} "
-            f"ready_bar={rbar} htf_fast={f} htf_mid={m} threshold={thr}"
+            f"ready_bar={rbar} htf_fast={f} htf_mid={m} spread={spread_debug:.4%} threshold={thr}"
         )
 
 # ============================================================
