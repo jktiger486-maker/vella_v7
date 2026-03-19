@@ -80,16 +80,16 @@ CFG = {
     "40_SL_ENABLE":             True,
     "41_SL_PCT":                0.8,
     "50_TIMEOUT_EXIT_ENABLE":   False,
-    "51_TIMEOUT_BARS":          60,
+    "51_TIMEOUT_BARS":          24,
 
     # -------------------------
     # TP1 + TRAILING (BR8 concept / 양방향 공용)
     # -------------------------
     "80_TP1_ENABLE":            True,
-    "81_TP1_PCT":               0.004,   # 0.004 = 0.4%
+    "81_TP1_PCT":               0.006,   # 0.006 = 0.6%
     "82_TP1_PARTIAL_PCT":       0.50,
     "83_TRAIL_ENABLE":          True,
-    "84_TRAIL_CALLBACK_PCT":    0.004,
+    "84_TRAIL_CALLBACK_PCT":    0.006,
 
     # -------------------------
     # ENGINE
