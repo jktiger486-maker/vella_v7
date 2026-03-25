@@ -79,7 +79,7 @@ CFG = {
     # -------------------------
     "40_SL_ENABLE":             True,
     "41_SL_PCT":                0.8,
-    "50_TIMEOUT_EXIT_ENABLE":   False,
+    "50_TIMEOUT_EXIT_ENABLE":   True,
     "51_TIMEOUT_BARS":          24,
 
     # -------------------------
