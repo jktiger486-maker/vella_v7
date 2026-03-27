@@ -4,6 +4,9 @@
 # DONOR: BR7 LONG E1
 # MTF: 15m regime filter + 5m entry/exit execution
 # TP1 + TRAILING: BR8 concept inoculated (양방향 대칭)
+# [패치] 4H 방향 필터 추가 (SHORT: 4H close < EMA15 / LONG: 4H close > EMA15)
+# [패치] TP1 0.006 → 0.008
+# [패치] 15M 레짐: S>M>F 완전정렬 → EMA5/EMA30 돌파 감지로 교체 (초입 선행 진입)
 # ============================================================
 
 import os
@@ -28,6 +31,7 @@ CFG = {
     "01_TRADE_SYMBOL":          "BNBUSDT",
     "02_INTERVAL":              "5m",
     "02b_HTF_INTERVAL":         "15m",
+    "02c_HTF4H_INTERVAL":       "4h",       # 신규: 4H 필터 인터벌
     "03_CAPITAL_BASE_USDT":     150.0,
     "04_LEVERAGE":              1,
 
@@ -49,11 +53,22 @@ CFG = {
     "11L_EMA_MID":              11,
 
     # -------------------------
-    # HTF EMA (15m → 방향 필터 (Trend))
+    # HTF EMA (15m → 방향 전환 감지 / EMA5 × EMA30 돌파)
+    # SHORT: EMA5 하향돌파 EMA30 (완료봉 기준)
+    # LONG:  EMA5 상향돌파 EMA30 (완료봉 기준)
+    # EMA_MID(10)은 EXIT_READY 판단에만 사용
     # -------------------------
     "16_HTF_EMA_FAST":          5,
     "17_HTF_EMA_MID":           10,
     "18_HTF_EMA_SLOW":          30,
+
+    # -------------------------
+    # 4H FILTER (신규)
+    # SHORT 허용: 4H close < 4H EMA15
+    # LONG  허용: 4H close > 4H EMA15
+    # -------------------------
+    "19_HTF4H_EMA_LEN":         15,
+    "19b_HTF4H_FILTER_ENABLE":  True,
 
     # -------------------------
     # SLOPE FILTER (LONG E1 / from BR7)
@@ -86,7 +101,7 @@ CFG = {
     # TP1 + TRAILING (BR8 concept / 양방향 공용)
     # -------------------------
     "80_TP1_ENABLE":            True,
-    "81_TP1_PCT":               0.006,   # 0.006 = 0.6%
+    "81_TP1_PCT":               0.008,   # 0.006 → 0.008 변경
     "82_TP1_PARTIAL_PCT":       0.50,
     "83_TRAIL_ENABLE":          True,
     "84_TRAIL_CALLBACK_PCT":    0.006,
@@ -107,7 +122,7 @@ CFG = {
     "94_EXIT_DEBUG_LOG_ENABLE":    False,
 
     # -------------------------
-    # SYNC retry(거래소 체결 → 포지션 조회 → 엔진 상태 동기화)
+    # SYNC retry
     # -------------------------
     "95_SYNC_RETRY_COUNT":      3,
     "96_SYNC_RETRY_DELAY_SEC":  1.0,
@@ -170,6 +185,9 @@ def fetch_klines_futures(symbol: str, interval: str, limit: int) -> Optional[Lis
 def fetch_klines_15m(symbol: str, limit: int) -> Optional[List[Any]]:
     return fetch_klines_futures(symbol, CFG["02b_HTF_INTERVAL"], limit)
 
+def fetch_klines_4h(symbol: str, limit: int) -> Optional[List[Any]]:
+    return fetch_klines_futures(symbol, CFG["02c_HTF4H_INTERVAL"], limit)
+
 def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, Decimal]]:
     try:
         info = client.futures_exchange_info()
@@ -217,13 +235,6 @@ def normalize_qty_str(qty_str: str, lot: Dict[str, Decimal]) -> Optional[str]:
     precision = abs(step.as_tuple().exponent)
     return f"{qty:.{precision}f}"
 
-# ============================================================
-# PARTIAL QTY 계산 (TP1 전용)
-# dust 방지: partial < minQty → FULL 승격
-#            remaining < minQty → FULL 승격
-# 반환: (partial_qty_str, remaining_qty_str) or None (→ FULL 승격)
-# ============================================================
-
 def calc_partial_qty(
     qty_full_str: str,
     partial_pct: float,
@@ -253,13 +264,6 @@ def calc_partial_qty(
 
 # ============================================================
 # _sync_with_retry
-# 주문 후 거래소 포지션 재조회 — retry 구조
-# 반환:
-#   ("OK",   qty_str)   → 포지션 확인, 잔량 정상
-#   ("GONE", None)      → 포지션 완전 소멸 확인
-#   ("FAIL", None)      → retry 소진 후에도 조회 실패
-# side 검증 포함: 조회된 side가 기대 side와 다르면 FAIL
-# API 호출 전 선행 sleep — Race Condition 방지
 # ============================================================
 
 def _sync_with_retry(
@@ -271,7 +275,7 @@ def _sync_with_retry(
     delay: float,
 ) -> Tuple[str, Optional[str]]:
     for attempt in range(1, retries + 1):
-        time.sleep(delay)  # API 호출 전 선행 sleep (반영 지연 대기)
+        time.sleep(delay)
         try:
             positions = client.futures_position_information(symbol=symbol)
             for pos in positions:
@@ -280,7 +284,6 @@ def _sync_with_retry(
                     if abs(amt) < 1e-9:
                         log.info(f"[SYNC_RETRY] attempt={attempt} → GONE")
                         return ("GONE", None)
-                    # side 검증
                     actual_side = "LONG" if amt > 0 else "SHORT"
                     if actual_side != expected_side:
                         log.warning(
@@ -293,7 +296,6 @@ def _sync_with_retry(
                         return ("GONE", None)
                     log.info(f"[SYNC_RETRY] attempt={attempt} → OK qty={qty_str}")
                     return ("OK", qty_str)
-            # 심볼 자체가 없으면 GONE
             return ("GONE", None)
         except Exception as e:
             log.error(f"[SYNC_RETRY] attempt={attempt} error: {e}")
@@ -302,8 +304,6 @@ def _sync_with_retry(
 
 # ============================================================
 # _fetch_entry_price
-# FULL EXIT 잔량 발생 시 거래소 평균 entry_price 재조회
-# 반환: float (갱신된 entry_price) or None (조회 실패 → 기존값 유지)
 # ============================================================
 
 def _fetch_entry_price(
@@ -384,9 +384,8 @@ class Position:
     entry_type:   str  = "E1"
     e2_pullback:  Optional[bool] = None
     e2_reentry:   Optional[bool] = None
-    # TP1 + TRAILING 상태
     tp1_done:     bool  = False
-    tp1_attempted: bool = False   # PARTIAL 주문 성공 후 즉시 True — 중복 발동 차단
+    tp1_attempted: bool = False
     trail_low:    float = float("inf")
     trail_high:   float = float("-inf")
 
@@ -415,12 +414,19 @@ class EngineState:
     htf_ema_slow:  IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["18_HTF_EMA_SLOW"]))
     htf_last_open_time: Optional[int] = None
 
+    # 신규: 4H 필터
+    htf4h_ema:           IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["19_HTF4H_EMA_LEN"]))
+    htf4h_last_open_time: Optional[int] = None
+    htf4h_allow_short:   bool = False
+    htf4h_allow_long:    bool = False
+
     short_exit_ready:     bool          = False
     long_exit_ready:      bool          = False
     short_exit_ready_bar: Optional[int] = None
     long_exit_ready_bar:  Optional[int] = None
 
     prev_arena_state: Optional[bool] = None
+    _htf_regime_hold: str            = "NONE"  # 15M 마지막 돌파 방향 보존용
 
 # ============================================================
 # WARMUP CHECK
@@ -439,23 +445,74 @@ def _warmup_done(st: EngineState) -> bool:
         swing + 2,
         62,
     )
-    bars_ok = st.bar >= needed
-    htf_ok  = (
+    bars_ok  = st.bar >= needed
+    htf_ok   = (
         st.htf_ema_fast.ready and
         st.htf_ema_mid.ready  and
         st.htf_ema_slow.ready
     )
-    return bars_ok and htf_ok
+    htf4h_ok = st.htf4h_ema.ready if CFG["19b_HTF4H_FILTER_ENABLE"] else True
+    return bars_ok and htf_ok and htf4h_ok
 
 # ============================================================
-# 15m UPDATE — limit=2 (incremental EMA이므로 직전 완료봉 1개면 충분)
+# 4H UPDATE
+# ============================================================
+
+def update_4h_ema(st: EngineState, symbol: str) -> None:
+    if not CFG["19b_HTF4H_FILTER_ENABLE"]:
+        return
+    kl_4h = fetch_klines_4h(symbol, 2)
+    if not kl_4h or len(kl_4h) < 2:
+        return
+    completed_4h  = kl_4h[0]
+    open_time_4h  = int(completed_4h[0])
+    if st.htf4h_last_open_time == open_time_4h:
+        return
+    close_4h = float(completed_4h[4])
+    st.htf4h_ema.update(close_4h)
+    st.htf4h_last_open_time = open_time_4h
+    st.htf4h_ema.trim_history()
+
+    ema_val = st.htf4h_ema.get()
+    if ema_val is not None:
+        st.htf4h_allow_short = close_4h < ema_val
+        st.htf4h_allow_long  = close_4h > ema_val
+        label_s = "PASS" if st.htf4h_allow_short else "BLOCK"
+        label_l = "PASS" if st.htf4h_allow_long  else "BLOCK"
+        log.info(
+            f"[4H FILTER] close={close_4h:.4f} EMA{CFG['19_HTF4H_EMA_LEN']}={ema_val:.4f} "
+            f"SHORT={label_s} LONG={label_l}"
+        )
+
+# ============================================================
+# 4H FILTER CHECK
+# ============================================================
+
+def check_4h_short_allowed(st: EngineState) -> bool:
+    if not CFG["19b_HTF4H_FILTER_ENABLE"]:
+        return True
+    if not st.htf4h_ema.ready:
+        log.warning("[4H FILTER] EMA not ready → BLOCK")
+        return False
+    return st.htf4h_allow_short
+
+def check_4h_long_allowed(st: EngineState) -> bool:
+    if not CFG["19b_HTF4H_FILTER_ENABLE"]:
+        return True
+    if not st.htf4h_ema.ready:
+        log.warning("[4H FILTER] EMA not ready → BLOCK")
+        return False
+    return st.htf4h_allow_long
+
+# ============================================================
+# 15m UPDATE
 # ============================================================
 
 def update_15m_emas(st: EngineState, symbol: str) -> None:
     kl_15m = fetch_klines_15m(symbol, 2)
     if not kl_15m or len(kl_15m) < 2:
         return
-    completed_15m = kl_15m[0]   # limit=2 시 index 0 = 직전 완료봉
+    completed_15m = kl_15m[0]
     open_time_15m = int(completed_15m[0])
     if st.htf_last_open_time == open_time_15m:
         return
@@ -473,20 +530,41 @@ def update_15m_emas(st: EngineState, symbol: str) -> None:
     )
 
 # ============================================================
-# 15m REGIME
+# 15m REGIME — EMA5 × EMA30 돌파 감지 (초입 선행 진입)
+# SHORT: EMA5[-2] >= EMA30[-2] and EMA5[-1] < EMA30[-1]
+# LONG:  EMA5[-2] <= EMA30[-2] and EMA5[-1] > EMA30[-1]
+# HOLD:  직전 돌파 방향 유지 (재돌파 전까지)
 # ============================================================
 
 def get_15m_regime(st: EngineState) -> str:
-    f = st.htf_ema_fast.get()
-    m = st.htf_ema_mid.get()
-    s = st.htf_ema_slow.get()
-    if f is None or m is None or s is None:
+    f_now  = st.htf_ema_fast.get()
+    f_prev = st.htf_ema_fast.get_prev()
+    s_now  = st.htf_ema_slow.get()
+    s_prev = st.htf_ema_slow.get_prev()
+
+    if f_now is None or f_prev is None or s_now is None or s_prev is None:
         return "NONE"
-    if s > m > f:
+
+    # SHORT 돌파: EMA5가 EMA30을 하향 돌파
+    if (f_prev >= s_prev) and (f_now < s_now):
+        st._htf_regime_hold = "SHORT"
+        log.info(
+            f"[15M REGIME] SHORT 돌파: ema5_prev={f_prev:.4f} ema30_prev={s_prev:.4f} "
+            f"→ ema5={f_now:.4f} ema30={s_now:.4f}"
+        )
         return "SHORT"
-    if f > m > s:
+
+    # LONG 돌파: EMA5가 EMA30을 상향 돌파
+    if (f_prev <= s_prev) and (f_now > s_now):
+        st._htf_regime_hold = "LONG"
+        log.info(
+            f"[15M REGIME] LONG 돌파: ema5_prev={f_prev:.4f} ema30_prev={s_prev:.4f} "
+            f"→ ema5={f_now:.4f} ema30={s_now:.4f}"
+        )
         return "LONG"
-    return "NONE"
+
+    # 돌파 없음 → 직전 방향 유지
+    return st._htf_regime_hold
 
 # ============================================================
 # 15m EXIT-READY CHECK
@@ -501,7 +579,6 @@ def check_15m_exit_ready(st: EngineState) -> None:
         return
 
     if st.position.side == "SHORT" and not st.short_exit_ready:
-        # SHORT 과열: 15m EMA_FAST가 EMA_MID 아래로 충분히 벌어진 상태
         spread = (m - f) / m
         if spread > float(CFG["70_SHORT_EXIT_THRESHOLD_PCT"]):
             st.short_exit_ready     = True
@@ -512,7 +589,6 @@ def check_15m_exit_ready(st: EngineState) -> None:
             )
 
     if st.position.side == "LONG" and not st.long_exit_ready:
-        # LONG 과열: 15m EMA_FAST가 EMA_MID 위로 충분히 벌어진 상태
         spread = (f - m) / m
         if spread > float(CFG["71_LONG_EXIT_THRESHOLD_PCT"]):
             st.long_exit_ready     = True
@@ -527,7 +603,6 @@ def check_15m_exit_ready(st: EngineState) -> None:
         rdy  = st.short_exit_ready if side == "SHORT" else st.long_exit_ready
         rbar = st.short_exit_ready_bar if side == "SHORT" else st.long_exit_ready_bar
         thr  = CFG["70_SHORT_EXIT_THRESHOLD_PCT"] if side == "SHORT" else CFG["71_LONG_EXIT_THRESHOLD_PCT"]
-        # spread 방향도 수정된 공식 기준으로 출력
         spread_debug = (m - f) / m if side == "SHORT" else (f - m) / m
         log.debug(
             f"[EXIT_READY_STATUS] side={side} ready={rdy} bar={st.bar} "
@@ -538,8 +613,10 @@ def check_15m_exit_ready(st: EngineState) -> None:
 # SHORT ENTRY SIGNALS (BR8 FROZEN)
 # ============================================================
 
-def short_entry_signals(st: EngineState):
-    if get_15m_regime(st) != "SHORT":
+def short_entry_signals(st: EngineState, regime: str):
+    if regime != "SHORT":
+        return "", None, None
+    if not check_4h_short_allowed(st):
         return "", None, None
     if not _warmup_done(st):
         return "", None, None
@@ -601,8 +678,10 @@ def short_entry_signals(st: EngineState):
 # LONG ENTRY SIGNALS (BR7 E1 + SHORT E2 대칭 E2)
 # ============================================================
 
-def long_entry_signals(st: EngineState):
-    if get_15m_regime(st) != "LONG":
+def long_entry_signals(st: EngineState, regime: str):
+    if regime != "LONG":
+        return "", None, None
+    if not check_4h_long_allowed(st):
         return "", None, None
     if not _warmup_done(st):
         return "", None, None
@@ -662,17 +741,6 @@ def long_entry_signals(st: EngineState):
 
 # ============================================================
 # 5m EXIT EXECUTION
-# 반환: Tuple[str, Optional[str]]
-#   ("NONE",    None)
-#   ("FULL",    reason_str)
-#   ("PARTIAL", partial_qty_str)
-#
-# 우선순위:
-#   [1] SL
-#   [2] TIMEOUT
-#   [3] TP1 partial  ← SYNC 차단 / tp1_attempted 차단
-#   [4] TRAILING     ← SYNC 차단 / tp1_done 이후만
-#   [5] 기존 EMA EXIT
 # ============================================================
 
 def exit_execution_5m(
@@ -707,7 +775,7 @@ def exit_execution_5m(
                 log.info(f"[EXIT_TIMEOUT] bars={st.bar - pos.entry_bar}")
                 return ("FULL", "TIMEOUT")
 
-    # ---- [3] TP1 PARTIAL — SYNC 차단 / tp1_attempted 차단 ----
+    # ---- [3] TP1 PARTIAL ----
     if (
         CFG["80_TP1_ENABLE"]
         and not pos.tp1_done
@@ -751,7 +819,7 @@ def exit_execution_5m(
                 )
                 return ("PARTIAL", partial_qty_str)
 
-    # ---- [4] TRAILING — SYNC 차단 / tp1_done 이후만 ----
+    # ---- [4] TRAILING ----
     if CFG["83_TRAIL_ENABLE"] and pos.tp1_done and pos.entry_type != "SYNC":
         callback = float(CFG["84_TRAIL_CALLBACK_PCT"])
 
@@ -787,7 +855,7 @@ def exit_execution_5m(
                 )
                 return ("FULL", "TRAIL")
 
-    # ---- [5] 기존 EMA EXIT ----
+    # ---- [5] EMA EXIT ----
     ef      = st.ema_exit_fast.get()
     em      = st.ema_exit_mid.get()
     ef_prev = st.ema_exit_fast.get_prev()
@@ -872,10 +940,9 @@ def place_short_entry(client, symbol, capital_usdt, lot):
         client.futures_create_order(
             symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty_str,
         )
-        # 실체결가 확정 — 주문 후 재조회
         retries = int(CFG["95_SYNC_RETRY_COUNT"])
         delay   = float(CFG["96_SYNC_RETRY_DELAY_SEC"])
-        actual_entry = price  # fallback
+        actual_entry = price
         for attempt in range(1, retries + 1):
             try:
                 time.sleep(delay)
@@ -942,10 +1009,9 @@ def place_long_entry(client, symbol, capital_usdt, lot):
         client.futures_create_order(
             symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty_str,
         )
-        # 실체결가 확정 — 주문 후 재조회
         retries = int(CFG["95_SYNC_RETRY_COUNT"])
         delay   = float(CFG["96_SYNC_RETRY_DELAY_SEC"])
-        actual_entry = price  # fallback
+        actual_entry = price
         for attempt in range(1, retries + 1):
             try:
                 time.sleep(delay)
@@ -1087,20 +1153,19 @@ def engine():
 
     log.info(
         f"START VELLA_MTF | symbol={symbol} interval={interval} htf={CFG['02b_HTF_INTERVAL']} "
+        f"htf4h={CFG['02c_HTF4H_INTERVAL']} htf4h_filter={CFG['19b_HTF4H_FILTER_ENABLE']} "
         f"capital={capital} lev={CFG['04_LEVERAGE']} "
         f"| SHORT_ENTRY_EMA=({CFG['10_EMA_FAST']},{CFG['11_EMA_MID']},{CFG['12_EMA_ARENA']}) "
         f"| LONG_ENTRY_EMA=({CFG['10L_EMA_FAST']},{CFG['11L_EMA_MID']}) "
         f"| HTF_EMA=({CFG['16_HTF_EMA_FAST']},{CFG['17_HTF_EMA_MID']},{CFG['18_HTF_EMA_SLOW']}) "
+        f"| 4H_EMA={CFG['19_HTF4H_EMA_LEN']} "
         f"| EXIT_EMA=({CFG['30_EXIT_FAST_EMA']},{CFG['31_EXIT_MID_EMA']}) "
-        f"| SHORT_THR={CFG['70_SHORT_EXIT_THRESHOLD_PCT']} LONG_THR={CFG['71_LONG_EXIT_THRESHOLD_PCT']} "
         f"| TP1={CFG['80_TP1_ENABLE']} TP1_PCT={CFG['81_TP1_PCT']} PARTIAL={CFG['82_TP1_PARTIAL_PCT']} "
-        f"| TRAIL={CFG['83_TRAIL_ENABLE']} CALLBACK={CFG['84_TRAIL_CALLBACK_PCT']} "
-        f"| SYNC_RETRY={retries} DELAY={delay} "
-        f"| E2_LOG={CFG['93_E2_CANDIDATE_LOG_ENABLE']} EXIT_DEBUG={CFG['94_EXIT_DEBUG_LOG_ENABLE']}"
+        f"| TRAIL={CFG['83_TRAIL_ENABLE']} CALLBACK={CFG['84_TRAIL_CALLBACK_PCT']}"
     )
 
     # ======================================
-    # COLD START: 5m warmup — limit=1500
+    # COLD START: 5m warmup
     # ======================================
     kl_init = fetch_klines_futures(symbol, interval, int(CFG["90_KLINE_LIMIT"]))
     if not kl_init:
@@ -1113,7 +1178,7 @@ def engine():
     log.info(f"[BOOT] 5m warmup complete: {st.bar} bars")
 
     # ======================================
-    # COLD START: 15m warmup — limit=1500
+    # COLD START: 15m warmup
     # ======================================
     kl_15m_init = fetch_klines_15m(symbol, int(CFG["90_KLINE_LIMIT"]))
     if kl_15m_init:
@@ -1125,26 +1190,62 @@ def engine():
             st.htf_ema_slow.update(close_15m)
         if completed_15m_bars:
             st.htf_last_open_time = int(completed_15m_bars[-1][0])
+
+        # 부팅 시 _htf_regime_hold 복원 — EMA5/EMA30 현재 위치로 초기 방향 세팅
+        f_now = st.htf_ema_fast.get()
+        s_now = st.htf_ema_slow.get()
+        if f_now is not None and s_now is not None:
+            if f_now < s_now:
+                st._htf_regime_hold = "SHORT"
+            elif f_now > s_now:
+                st._htf_regime_hold = "LONG"
+            else:
+                st._htf_regime_hold = "NONE"
+
         log.info(
             f"[BOOT] 15m warmup complete: {len(completed_15m_bars)} bars "
-            f"| htf_fast={st.htf_ema_fast.get()} htf_mid={st.htf_ema_mid.get()} htf_slow={st.htf_ema_slow.get()} "
-            f"| regime={get_15m_regime(st)} | warmup_done={_warmup_done(st)}"
+            f"| ema5={st.htf_ema_fast.get()} ema30={st.htf_ema_slow.get()} "
+            f"| _htf_regime_hold={st._htf_regime_hold} | warmup_done={_warmup_done(st)}"
         )
     else:
-        log.warning("[BOOT] 15m kline fetch failed — regime will be NONE until 15m data arrives")
+        log.warning("[BOOT] 15m kline fetch failed")
 
     # ======================================
-    # MAIN LOOP — 5m polling limit=2
+    # COLD START: 4H warmup (신규)
+    # ======================================
+    if CFG["19b_HTF4H_FILTER_ENABLE"]:
+        kl_4h_init = fetch_klines_4h(symbol, int(CFG["19_HTF4H_EMA_LEN"]) + 10)
+        if kl_4h_init:
+            completed_4h_bars = kl_4h_init[:-1]
+            for k in completed_4h_bars:
+                close_4h = float(k[4])
+                st.htf4h_ema.update(close_4h)
+            if completed_4h_bars:
+                st.htf4h_last_open_time = int(completed_4h_bars[-1][0])
+                last_close_4h = float(completed_4h_bars[-1][4])
+                ema_val = st.htf4h_ema.get()
+                if ema_val is not None:
+                    st.htf4h_allow_short = last_close_4h < ema_val
+                    st.htf4h_allow_long  = last_close_4h > ema_val
+            log.info(
+                f"[BOOT] 4H warmup complete: {len(completed_4h_bars)} bars "
+                f"| EMA{CFG['19_HTF4H_EMA_LEN']}={st.htf4h_ema.get()} "
+                f"| allow_short={st.htf4h_allow_short} allow_long={st.htf4h_allow_long}"
+            )
+        else:
+            log.warning("[BOOT] 4H kline fetch failed — 4H filter will BLOCK until data arrives")
+
+    # ======================================
+    # MAIN LOOP
     # ======================================
     while not STOP:
         try:
-            # cold start 이후 메인루프는 limit=2만 요청 (직전 완료봉 + 현재봉)
             kl = fetch_klines_futures(symbol, interval, 2)
             if not kl or len(kl) < 2:
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
 
-            completed = kl[0]   # limit=2 시 index 0 = 직전 완료봉
+            completed = kl[0]
             open_time = int(completed[0])
 
             if st.last_open_time == open_time:
@@ -1158,6 +1259,9 @@ def engine():
 
             # ---- 15m UPDATE ----
             update_15m_emas(st, symbol)
+
+            # ---- 4H UPDATE (신규) ----
+            update_4h_ema(st, symbol)
 
             # ---- REGIME ----
             regime = get_15m_regime(st)
@@ -1179,7 +1283,7 @@ def engine():
                 _reset_exit_state(st)
 
                 if regime == "SHORT":
-                    entry_type, pb, re = short_entry_signals(st)
+                    entry_type, pb, re = short_entry_signals(st, regime)
                     if entry_type:
                         order = place_short_entry(client, symbol, capital, lot)
                         if order:
@@ -1203,7 +1307,7 @@ def engine():
                             log.error("[ENTRY_FAIL] SHORT order failed")
 
                 elif regime == "LONG":
-                    entry_type, pb, re = long_entry_signals(st)
+                    entry_type, pb, re = long_entry_signals(st, regime)
                     if entry_type:
                         order = place_long_entry(client, symbol, capital, lot)
                         if order:
@@ -1245,10 +1349,7 @@ def engine():
                         ok = place_long_partial_exit(client, symbol, partial_qty_str, lot)
 
                     if ok:
-                        # 주문 성공 즉시 tp1_attempted = True — 중복 발동 차단
                         st.position.tp1_attempted = True
-
-                        # retry sync 로 잔량 확정
                         sync_status, actual_qty = _sync_with_retry(
                             client, symbol, lot, side, retries, delay
                         )
@@ -1269,7 +1370,6 @@ def engine():
                             st.position = None
                             _reset_exit_state(st)
                         else:
-                            # FAIL — tp1_attempted True로 재발동 차단, qty 갱신은 보류
                             log.error(
                                 f"[TP1_SYNC_FAIL] {side} retry sync failed — "
                                 f"tp1_attempted=True (중복 차단), qty 미갱신, 다음 바 계속"
@@ -1286,7 +1386,6 @@ def engine():
                         ok = place_long_exit(client, symbol, st.position.qty, lot)
 
                     if ok:
-                        # 주문 성공 → retry sync 로 포지션 소멸 확인
                         sync_status, actual_qty = _sync_with_retry(
                             client, symbol, lot, side, retries, delay
                         )
@@ -1299,7 +1398,6 @@ def engine():
                             st.position = None
                             _reset_exit_state(st)
                         elif sync_status == "OK" and actual_qty is not None:
-                            # 잔량 남아 있음 — qty + entry_price 재동기화 후 포지션 유지
                             new_entry = _fetch_entry_price(client, symbol, side)
                             st.position.qty = actual_qty
                             if new_entry is not None:
