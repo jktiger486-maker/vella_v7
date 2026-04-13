@@ -17,7 +17,7 @@ BR8 SHORT LADDER 기준선을 100% 유지하되 방향만 LONG으로 반전.
 - 거미줄 무효화: 하단 이탈 시 (current < bottom_price * (1 - buffer))
 - sync: 롱 포지션(amt > 0) / BUY 주문 기준 복구
 
-[v10.1 패치 — BR8 개선사항 이식]
+[v7 패치 — BR8 개선사항 이식]
 - CFG["MARGIN_TYPE"] 추가: 엔진 시작 시 CROSS/ISOLATED 자동 설정
 - CFG 테마별 번호 구분 (10~80번대)
 - _fetch_5m_trigger_inputs 분리 + BarCache 정규화
@@ -27,8 +27,12 @@ BR8 SHORT LADDER 기준선을 100% 유지하되 방향만 LONG으로 반전.
 - HARD_SL_PCT 0.08 → 0.05
 - TRAILING_REBOUND_PCT 0.01 → 0.005
 
+[v7.2 패치]
+- HARD SL: 10단 체결 완료 후에만 발동 (1~9단 비활성)
+- _deploy_ladder: LADDER_ACTIVE 고정 (POSITION_HOLD 직행 제거)
+
 EXIT 우선순위:
-  1. HARD SL
+  1. HARD SL (10단 체결 완료 후에만)
   2. TIMEOUT
   3. TP1 1.2% → 50% 부분청산 후 트레일링 전환
   4. TRAIL EXIT: 고점 추적 → -0.5% 반락 시 전량 청산
@@ -78,20 +82,20 @@ CFG = {
     "HTF_FILTER_ENABLE":  True,
 
     # ── 30번대: 자본 / 레버리지 / 마진 ───────────────────
-    "TOTAL_CAPITAL_USDT": 5000.0,
+    "TOTAL_CAPITAL_USDT": 6000.0,
     "LEVERAGE":           3,
     "MARGIN_TYPE":        "CROSS",   # CROSS / ISOLATED
     "MAX_CAPITAL_RATIO":  0.95,
 
     # ── 40번대: 거미줄 구조 ───────────────────────────────
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.045,
+    "LADDER_GAP_PCT": 0.05,
     "SIZE_WEIGHTS": [
-        0.6, 0.8, 1.1, 1.5, 2.0, 
-        1.2, 1.0, 0.8, 0.7, 0.6
+        0.5, 0.7, 1.0, 1.4, 1.8,
+        1.4, 1.0, 0.8, 0.6, 0.5
     ],
-    "LADDER_INVALIDATION_MULT":    2.0,
-    "LADDER_NO_FILL_TIMEOUT_BARS": 12,
+    "LADDER_INVALIDATION_MULT": 999.0,
+    "LADDER_NO_FILL_TIMEOUT_BARS": 99999,
 
     # ── 50번대: TP / 트레일링 ─────────────────────────────
     "TP1_PROFIT_PCT":       0.01,
@@ -100,17 +104,17 @@ CFG = {
 
     # ── 60번대: EXIT 가격 구조 ────────────────────────────
     "FEE_PCT_ONEWAY":            0.0004,
-    "TARGET_PROFIT_STAGE_1_3":   0.012,   # 1~3차: TP1(1%) 백업
-    "TARGET_PROFIT_STAGE_4_5":   0.005,
-    "TARGET_PROFIT_STAGE_6_7":   0.003,
-    "TARGET_PROFIT_STAGE_8_9":   0.001,
-    "TARGET_PROFIT_STAGE_10":   -0.0008,
-    "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
+    "TARGET_PROFIT_STAGE_1_3": 0.012,
+    "TARGET_PROFIT_STAGE_4_5": 0.008,
+    "TARGET_PROFIT_STAGE_6_7": 0.006,
+    "TARGET_PROFIT_STAGE_8_9": 0.004,
+    "TARGET_PROFIT_STAGE_10": 0.003,
+    "EXIT_REPRICE_THRESHOLD_PCT": 0.006,
 
     # ── 70번대: 리스크 / 타임아웃 ────────────────────────
-    "HARD_SL_PCT":             0.05,
-    "DEEP_FILL_STAGE":         8,
-    "TIMEOUT_BARS_AFTER_DEEP": 12,
+    "HARD_SL_PCT": 0.07,
+    "DEEP_FILL_STAGE": 99,
+    "TIMEOUT_BARS_AFTER_DEEP": 99999,
 
     # ── 80번대: 운영 / 루프 ───────────────────────────────
     "REENTRY_COOLDOWN_BARS":      8,
@@ -127,7 +131,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("vella_range_long_v10.log", encoding="utf-8"),
+        logging.FileHandler("vella_range_long_v7.log", encoding="utf-8"),
     ]
 )
 log = logging.getLogger("VELLA_RL10")
@@ -747,7 +751,7 @@ class RangeLongEngine:
     # --------------------------------------------------------
     def run(self):
         log.info("=" * 60)
-        log.info("VELLA RANGE LONG LADDER v10.1 시작")
+        log.info("VELLA RANGE LONG LADDER v7.2 시작")
         log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
         log.info("=" * 60)
         self._sync_on_start()
@@ -868,9 +872,10 @@ class RangeLongEngine:
 
             pnl_pct = (current_price - avg_price) / avg_price
 
-            # 1. HARD SL
-            if pnl_pct < -CFG["HARD_SL_PCT"]:
-                log.warning(f"HARD SL 발동 | 손실 {pnl_pct*100:.2f}%")
+            # 1. HARD SL — v7.2: 10단 체결 완료 후에만 발동
+            if (self.max_filled_stage >= CFG["LADDER_COUNT"]
+                    and pnl_pct < -CFG["HARD_SL_PCT"]):
+                log.warning(f"HARD SL 발동 | 10단 완료 후 avg 기준 손실 {pnl_pct*100:.2f}%")
                 self._final_close(symbol, position_qty, "HARD_SL")
                 return
 
@@ -1017,7 +1022,8 @@ class RangeLongEngine:
         else:
             log.info(f"거미줄 배치 완료: {success}/{count}개 → LADDER_ACTIVE")
             self.no_fill_bars = 0
-            self.state = "POSITION_HOLD" if order_1st else "LADDER_ACTIVE"
+            # v7.2: LADDER_ACTIVE 고정 — POSITION_HOLD 직행 금지
+            self.state = "LADDER_ACTIVE"
 
     # --------------------------------------------------------
     # 거미줄 무효화 (롱: 하단 이탈)
